@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "w",
+  "main": "./worker-alias.js",
+  "compatibility_date": "2026-09-29",
+  // Set CLOUDFLARE_ACCOUNT_ID in your environment (or run `wrangler login`) before deploying.
+  "workers_dev": true,
+  "preview_urls": false,
+  "services": [
+    {
+      "binding": "WORKBENCH",
+      "service": "workbench"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

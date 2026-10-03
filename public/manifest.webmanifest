@@ -1,0 +1,13 @@
+{
+  "name": "Workbench · VPS coding console",
+  "short_name": "Workbench",
+  "description": "A private, mobile-first workspace for your coding agents.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#f3f3f1",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

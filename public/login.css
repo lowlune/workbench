@@ -1,0 +1,218 @@
+:root {
+  color-scheme: light;
+  font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #20212a;
+  background: #e9e8ef;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body { min-width: 320px; min-height: 100%; margin: 0; }
+
+body {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #e9e8ef;
+}
+
+body::before,
+body::after {
+  position: fixed;
+  z-index: -1;
+  inset: -12%;
+  content: "";
+  pointer-events: none;
+}
+
+body::before {
+  background-color: #e9e8ef;
+  background-image:
+    radial-gradient(ellipse at 18% 18%, #ffd2ae 0, transparent 36%),
+    radial-gradient(ellipse at 79% 26%, #b7b6ef 0, transparent 38%),
+    radial-gradient(ellipse at 68% 82%, #f6b7ca 0, transparent 36%),
+    radial-gradient(ellipse at 22% 78%, #b9e4d4 0, transparent 34%);
+  filter: blur(34px) saturate(1.12);
+  transform: scale(1.12);
+  animation: art-drift 28s ease-in-out infinite alternate;
+}
+
+body[data-art="1"]::before {
+  background-image:
+    radial-gradient(ellipse at 13% 24%, #ffbb9d 0, transparent 38%),
+    radial-gradient(ellipse at 78% 20%, #c5d8ff 0, transparent 39%),
+    radial-gradient(ellipse at 73% 83%, #f2b6e1 0, transparent 38%),
+    radial-gradient(ellipse at 24% 80%, #c7ead4 0, transparent 35%);
+}
+
+body[data-art="2"]::before {
+  background-image:
+    radial-gradient(ellipse at 20% 16%, #f5c6a8 0, transparent 38%),
+    radial-gradient(ellipse at 82% 27%, #c0b7f6 0, transparent 38%),
+    radial-gradient(ellipse at 70% 82%, #f8d59f 0, transparent 38%),
+    radial-gradient(ellipse at 18% 78%, #b9dce6 0, transparent 36%);
+}
+
+body[data-art="3"]::before {
+  background-image:
+    radial-gradient(ellipse at 14% 22%, #ffcf9c 0, transparent 37%),
+    radial-gradient(ellipse at 82% 19%, #a9d7d1 0, transparent 40%),
+    radial-gradient(ellipse at 74% 82%, #dfb5f5 0, transparent 38%),
+    radial-gradient(ellipse at 18% 77%, #f5b7b1 0, transparent 36%);
+}
+
+body[data-art="4"]::before {
+  background-image:
+    radial-gradient(ellipse at 19% 17%, #f5b8bf 0, transparent 38%),
+    radial-gradient(ellipse at 81% 23%, #b6c7f7 0, transparent 39%),
+    radial-gradient(ellipse at 72% 82%, #f7d5a5 0, transparent 38%),
+    radial-gradient(ellipse at 18% 79%, #b8e6d1 0, transparent 36%);
+}
+
+body[data-art="5"]::before {
+  background-image:
+    radial-gradient(ellipse at 16% 20%, #ffd1a8 0, transparent 39%),
+    radial-gradient(ellipse at 80% 20%, #c3b5ed 0, transparent 38%),
+    radial-gradient(ellipse at 75% 82%, #f0b3a4 0, transparent 38%),
+    radial-gradient(ellipse at 18% 79%, #b6dce4 0, transparent 35%);
+}
+
+body[data-art="6"]::before {
+  background-image:
+    radial-gradient(ellipse at 18% 18%, #e6b9ed 0, transparent 38%),
+    radial-gradient(ellipse at 82% 21%, #b4def1 0, transparent 39%),
+    radial-gradient(ellipse at 72% 80%, #f3c5a1 0, transparent 37%),
+    radial-gradient(ellipse at 18% 80%, #c6e4c1 0, transparent 36%);
+}
+
+body[data-art="7"]::before {
+  background-image:
+    radial-gradient(ellipse at 15% 19%, #f7c08b 0, transparent 39%),
+    radial-gradient(ellipse at 80% 21%, #b5c0f0 0, transparent 39%),
+    radial-gradient(ellipse at 76% 83%, #f0b8c9 0, transparent 37%),
+    radial-gradient(ellipse at 18% 79%, #a9ddd2 0, transparent 36%);
+}
+
+body::after {
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(135deg, #ffffff18, #22243a08 60%, #ffffff20);
+}
+
+button,
+input { font: inherit; }
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 38px;
+  border: 1px solid #ffffffb8;
+  border-radius: 28px;
+  background: #ffffffbd;
+  box-shadow: 0 28px 90px #28243b1a, inset 0 1px #ffffffd9;
+  backdrop-filter: blur(28px) saturate(1.25);
+  -webkit-backdrop-filter: blur(28px) saturate(1.25);
+}
+
+h1 {
+  margin: 0 0 26px;
+  color: #20212a;
+  font-size: clamp(28px, 6vw, 36px);
+  font-weight: 570;
+  letter-spacing: -.055em;
+  line-height: 1.05;
+  text-align: center;
+}
+
+form { display: grid; gap: 12px; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+input {
+  width: 100%;
+  height: 56px;
+  padding: 0 17px;
+  border: 1px solid #25263a24;
+  border-radius: 14px;
+  outline: none;
+  color: #20212a;
+  background: #ffffffc9;
+  font-size: 15px;
+  transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+input::placeholder { color: #777986; }
+
+input:focus {
+  border-color: #46486680;
+  background: #fff;
+  box-shadow: 0 0 0 4px #6c70a01c;
+}
+
+button {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 14px;
+  color: #fff;
+  background: #20212a;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+button:hover {
+  background: #303141;
+  box-shadow: 0 8px 22px #20212a24;
+  transform: translateY(-1px);
+}
+
+button:focus-visible { outline: 3px solid #555eaa80; outline-offset: 3px; }
+
+.login-error {
+  margin: 0;
+  color: #9a302d;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.login-error[hidden] { display: none; }
+
+@keyframes art-drift {
+  from { transform: scale(1.12) translate3d(-1%, 0, 0) rotate(-2deg); }
+  to { transform: scale(1.16) translate3d(1%, -1%, 0) rotate(2deg); }
+}
+
+@media (max-width: 520px) {
+  .login-card { padding: 30px 24px; border-radius: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}

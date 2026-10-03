@@ -1,0 +1,28 @@
+// Copy this file to wrangler.jsonc and fill in your account-specific values.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "workbench",
+  "main": "./worker.js",
+  "compatibility_date": "2026-09-27",
+  // Set CLOUDFLARE_ACCOUNT_ID in your environment (or run `wrangler login`) before deploying.
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  },
+  "vpc_services": [
+    {
+      "binding": "WORKBENCH_API",
+      // Replace with your own VPC service ID. The Worker proxies /api/* through this binding.
+      "service_id": "<your-vpc-service-id>",
+      "remote": true
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

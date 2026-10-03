@@ -1,0 +1,25 @@
+node_modules/
+.wrangler/
+
+# Local secrets
+.env
+.env.*
+.dev.vars
+*.local
+
+# Local Cloudflare deploy config (account-specific IDs); see wrangler.example.jsonc
+wrangler.jsonc
+
+# Runtime data (user content / generated)
+data/model-catalog.json
+data/clips.json
+data/login-failures.json
+data/clips/
+data/inbox/
+
+# Build staging
+public/build-staging/
+
+# Logs / OS junk
+*.log
+.DS_Store
