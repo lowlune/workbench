@@ -1,5 +1,5 @@
 import { api } from './api';
-import type { Bootstrap, Clip, Connection, Engine, Offering, Project, ProjectFile, Session, UsageResponse } from './types';
+import type { Bootstrap, Connection, Engine, Offering, Session, UsageResponse } from './types';
 
 export const v2 = <T,>(path: string, init?: RequestInit) => api<T>(`/api/v2${path}`, init);
 export const mutate = <T,>(path: string, body: unknown, method = 'POST') => v2<T>(path, { method, body: JSON.stringify(body) });
@@ -9,9 +9,6 @@ export const conversation = (id: string, before?: string) => v2<{ session: Sessi
 export const offerings = () => v2<{ models: Offering[]; favorites: string[]; defaults: Partial<Record<Engine, string | null>>; refreshing: boolean; error?: string | null; fetchedAt: number | null; connections: Connection[] }>('/models');
 export const connections = () => v2<{ connections: Connection[] }>('/connections');
 export const usageReport = (days: number, projectId?: string) => v2<UsageResponse>(`/usage?days=${days}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`);
-export const clips = (scope: string) => v2<{ clips: Clip[] }>(`/clips?projectId=${encodeURIComponent(scope)}`);
-export const projectFiles = (projectId: string, path = '') => v2<{ path: string; entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`);
-export const projectFileUrl = (projectId: string, path: string) => `/api/v2/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`;
 
 let database: Promise<IDBDatabase> | undefined;
 function db() {
@@ -44,4 +41,3 @@ export function rememberModel(engine: Engine, id: string) {
     localStorage.setItem('workbench-recent-models', JSON.stringify(all));
   } catch { /* Recents are a convenience; ignore storage failures. */ }
 }
-export type { Project };

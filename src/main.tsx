@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import App from '@/workbench-app';
+import App from '@/App';
 import '@/styles/whirl/globals.css';
 
 try {

@@ -1,5 +1,21 @@
 import type { Message } from '@/lib/types';
 
+export function titleCase(value?: string | null) {
+  if (!value) return '';
+  return value.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function statusLabel(status?: string) {
+  return ({
+    working: 'Thinking',
+    blocked: 'Needs your attention',
+    idle: 'Ready',
+    done: 'Ready',
+    history: 'Saved history',
+    unknown: 'Online',
+  } as Record<string, string>)[status || ''] || 'Conversation';
+}
+
 export function messageText(message: Message) {
   return message.parts.filter((part) => part.type === 'text').map((part) => part.text || '').join('\n');
 }
@@ -8,6 +24,14 @@ export function isActivity(message: Message) {
   return message.info.role === 'assistant'
     && !messageText(message).trim()
     && message.parts.some((part) => ['tool', 'step-start', 'step-finish', 'reasoning'].includes(part.type));
+}
+
+export function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
 }
 
 export function formatTokens(value: number) {

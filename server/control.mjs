@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -537,6 +537,217 @@ function attachmentsFor(ids) {
   });
 }
 
+/* ---- System telemetry, processes and read-only assistant ---- */
+
+const SYSTEM_SAMPLE_MS = 15000;
+const SYSTEM_SAMPLE_LIMIT = 240;
+const PROCESS_LIMIT = 25;
+const KILL_SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT'];
+const systemSamples = [];
+let lastCpuPercent = 0;
+let lastCpuTimes = readCpuTimes();
+
+function readSwap() {
+  try {
+    const text = readFileSync('/proc/meminfo', 'utf8');
+    const total = Number(text.match(/^SwapTotal:\s+(\d+)/m)?.[1] || 0) * 1024;
+    const free = Number(text.match(/^SwapFree:\s+(\d+)/m)?.[1] || 0) * 1024;
+    return { total, free, used: total - free };
+  } catch {
+    return { total: 0, free: 0, used: 0 };
+  }
+}
+
+function readCpuTimes() {
+  try {
+    const line = readFileSync('/proc/stat', 'utf8').split('\n').find((row) => row.startsWith('cpu '));
+    if (!line) return { idle: 0, total: 0 };
+    const values = line.trim().split(/\s+/).slice(1).map(Number);
+    return { idle: (values[3] || 0) + (values[4] || 0), total: values.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0) };
+  } catch {
+    return { idle: 0, total: 0 };
+  }
+}
+
+/* CPU percent is derived only by the sampler so interleaved requests cannot
+   skew the delta; windows shorter than ~1.5s of CPU time keep the last value. */
+function cpuPercent() {
+  const next = readCpuTimes();
+  const idleDelta = next.idle - lastCpuTimes.idle;
+  const totalDelta = next.total - lastCpuTimes.total;
+  lastCpuTimes = next;
+  if (totalDelta <= 150) return null;
+  return Math.max(0, Math.min(100, Math.round((1 - idleDelta / totalDelta) * 100)));
+}
+
+function systemStats() {
+  const total = os.totalmem();
+  const free = os.freemem();
+  return {
+    load: os.loadavg().map((value) => Number(value.toFixed(2))),
+    cpuCount: os.cpus().length,
+    memoryTotal: total,
+    memoryFree: free,
+    memoryUsed: total - free,
+    memoryPercent: Math.round(((total - free) / total) * 100),
+    swap: readSwap(),
+    uptime: os.uptime(),
+  };
+}
+
+function readDisk() {
+  try {
+    const stats = statfsSync(HOME);
+    const total = Number(stats.blocks) * Number(stats.bsize);
+    const free = Number(stats.bavail) * Number(stats.bsize);
+    const used = total - free;
+    return { total, free, used, percent: total > 0 ? Math.round((used / total) * 100) : 0 };
+  } catch {
+    return { total: 0, free: 0, used: 0, percent: 0 };
+  }
+}
+
+function sampleSystem() {
+  const stats = systemStats();
+  const cpu = cpuPercent();
+  if (cpu !== null) lastCpuPercent = cpu;
+  const sample = { t: Date.now(), cpu: lastCpuPercent, memoryPercent: stats.memoryPercent, memoryUsed: stats.memoryUsed };
+  systemSamples.push(sample);
+  if (systemSamples.length > SYSTEM_SAMPLE_LIMIT) systemSamples.splice(0, systemSamples.length - SYSTEM_SAMPLE_LIMIT);
+  return sample;
+}
+
+function systemSnapshot() {
+  const base = systemStats();
+  return { ...base, cpu: { percent: lastCpuPercent, cores: base.cpuCount }, disk: readDisk(), sampledAt: Date.now() };
+}
+
+async function listProcesses() {
+  const result = await execFileAsync('/usr/bin/ps', ['-eo', 'pid=,pcpu=,pmem=,etimes=,user=,comm=,args=', '--sort=-pcpu', '--no-headers']);
+  if (result.error) throw fail('Could not read the process list.', 500);
+  const processes = [];
+  for (const line of result.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$/.exec(line);
+    if (!match) continue;
+    processes.push({
+      pid: Number(match[1]),
+      cpu: Number(match[2]),
+      memory: Number(match[3]),
+      etimes: Number(match[4]),
+      user: match[5],
+      name: match[6],
+      args: match[7].slice(0, 160),
+    });
+    if (processes.length >= PROCESS_LIMIT) break;
+  }
+  return processes;
+}
+
+async function killProcess(req, res, pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) throw fail('Invalid process ID.', 400);
+  if (pid === process.pid || pid === process.ppid) throw fail('Refusing to kill the Workbench control plane.', 403);
+  const b = await body(req);
+  const signal = String(b.signal || 'SIGTERM');
+  if (!KILL_SIGNALS.includes(signal)) throw fail('Signal must be SIGTERM, SIGKILL or SIGINT.', 400);
+  let status;
+  try {
+    status = readFileSync(`/proc/${pid}/status`, 'utf8');
+  } catch {
+    throw fail('Process not found.', 404);
+  }
+  const uid = Number(/^Uid:\s+(\d+)/m.exec(status)?.[1]);
+  if (!Number.isSafeInteger(uid)) throw fail('Process not found.', 404);
+  if (uid !== process.getuid()) throw fail('Only processes owned by the Workbench user can be stopped.', 403);
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (error.code === 'ESRCH') throw fail('Process not found.', 404);
+    if (error.code === 'EPERM') throw fail('Only processes owned by the Workbench user can be stopped.', 403);
+    throw fail('Could not stop the process.', 409);
+  }
+  return json(res, 200, { killed: true, pid, signal });
+}
+
+function transcriptFor(conversationId) {
+  const page = messagesPage(store.conversation(conversationId));
+  return page.messages
+    .map((message) => {
+      if (!['user', 'assistant'].includes(message.info?.role)) return null;
+      const text = message.parts.filter((part) => part.type === 'text').map((part) => part.text || '').join('\n').trim();
+      return text ? `${message.info.role === 'user' ? 'User' : 'Assistant'}: ${text}` : null;
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(-8000);
+}
+
+async function assistant(req, res) {
+  const b = await body(req);
+  const conversationId = typeof b.conversationId === 'string' ? b.conversationId : '';
+  if (!conversationId) throw fail('Conversation is required.');
+  const auth = await readAuth();
+  const apiKey = auth['opencode-go']?.key;
+  if (!apiKey) throw fail('No OpenCode Go credentials are available.', 503);
+  const transcript = transcriptFor(conversationId);
+  const history = (Array.isArray(b.messages) ? b.messages : [])
+    .filter((message) => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
+    .slice(-20)
+    .map((message) => ({ role: message.role, content: message.content.slice(0, 8000) }));
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+  res.flushHeaders();
+  const send = (payload) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+  try {
+    const upstream = await fetch('https://opencode.ai/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-opencode-session': conversationId },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        stream: true,
+        max_tokens: 1200,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: `You are Workbench Assistant, a read-only helper inside a coding console. Answer questions about the conversation below. Be concise. You cannot run commands or change files.\n\nCONVERSATION (oldest first, truncated):\n${transcript}` },
+          ...history,
+        ],
+      }),
+      signal: controller.signal,
+    });
+    if (!upstream.ok) {
+      const detail = (await upstream.text().catch(() => '')).slice(0, 500);
+      throw new Error(`OpenCode Go request failed (${upstream.status})${detail ? `: ${detail}` : ''}`);
+    }
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta) send({ delta });
+        } catch {}
+      }
+    }
+    send({ done: true });
+    res.end();
+  } catch (error) {
+    send({ error: error.name === 'AbortError' ? 'The assistant request was cancelled.' : error.message || 'The assistant request failed.' });
+    res.end();
+  }
+}
+
 /* ---- HTTP ---- */
 
 function json(res, status, value) {
@@ -998,6 +1209,13 @@ async function routes(req, res) {
     });
   }
 
+  if (route === '/system' && method === 'GET') return json(res, 200, systemSnapshot());
+  if (route === '/system/history' && method === 'GET') return json(res, 200, { samples: systemSamples, intervalMs: SYSTEM_SAMPLE_MS });
+  if (route === '/processes' && method === 'GET') return json(res, 200, { processes: await listProcesses() });
+  const killMatch = /^\/processes\/([^/]+)\/kill$/.exec(route);
+  if (killMatch && method === 'POST') return killProcess(req, res, Number(killMatch[1]));
+  if (route === '/assistant' && method === 'POST') return assistant(req, res);
+
   throw fail('Not found.', 404);
 }
 
@@ -1021,6 +1239,9 @@ server.listen(Number(process.env.WORKBENCH_CONTROL_PORT || 8788), '127.0.0.1', (
 
 const scheduler = setInterval(() => void tick(), 2000);
 scheduler.unref();
+sampleSystem();
+const systemSampler = setInterval(sampleSystem, SYSTEM_SAMPLE_MS);
+systemSampler.unref();
 const prune = setInterval(() => {
   store.db.prepare('DELETE FROM events WHERE created<? AND seq<(SELECT max(seq)-1000 FROM events)').run(Date.now() - 7 * 86400000);
   store.db.prepare('DELETE FROM artifacts WHERE length(data)<2 OR conversation_id NOT IN (SELECT id FROM conversations)').run();
@@ -1031,6 +1252,7 @@ void refreshCatalog().catch((error) => console.warn(error.message));
 async function shutdown() {
   shuttingDown = true;
   clearInterval(scheduler);
+  clearInterval(systemSampler);
   for (const run of runs.values()) {
     run.cancelled = true;
     store.status(run.command.id, 'interrupted', 'Runner service stopped.');

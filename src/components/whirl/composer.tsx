@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type 
 import {
   IconArrowUp,
   IconClipboard,
-  IconFolder,
   IconLoader2,
   IconPaperclip,
   IconPlayerStopFilled,
@@ -33,8 +32,6 @@ export function Composer({
   floating = false,
   focusSignal = 0,
   onToast,
-  onOpenLibrary,
-  onOpenProjectFiles,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -53,8 +50,6 @@ export function Composer({
   /** Bump to focus the textarea — "New task" lands the caret here. */
   focusSignal?: number;
   onToast: (message: string, isError?: boolean) => void;
-  onOpenLibrary?: () => void;
-  onOpenProjectFiles?: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -90,8 +85,7 @@ export function Composer({
     }
     setProcessing(true);
     try {
-      const next = [];
-      for (const file of incoming) next.push(await fileToDataUrl(file));
+      const next = await Promise.all(incoming.map(fileToDataUrl));
       onAttachmentsChange([...attachments, ...next]);
     } catch (error) {
       onToast(error instanceof Error ? error.message : 'Could not read that image.', true);
@@ -120,12 +114,7 @@ export function Composer({
       }
       if (navigator.clipboard.readText) {
         const text = await navigator.clipboard.readText();
-        if (text) {
-          const element = textareaRef.current;
-          const start = element?.selectionStart ?? draft.length;
-          const end = element?.selectionEnd ?? start;
-          onDraftChange(`${draft.slice(0, start)}${text}${draft.slice(end)}`);
-        }
+        if (text) onDraftChange(`${draft}${draft && !draft.endsWith('\n') ? '\n' : ''}${text}`);
         else onToast('The clipboard is empty.', true);
       } else {
         onToast('Clipboard access is unavailable in this browser.', true);
@@ -148,8 +137,8 @@ export function Composer({
 
   const canSend = !disabled && !sendBlocked && !sending && !processing && Boolean(draft.trim() || attachments.length);
   /* Whirl's rule: an empty composer while the agent writes offers Stop; the
-     first typed character hands the pill back to Send (Workbench has no
-     queue, so the follow-up goes out immediately, as the old UI did). */
+     first typed character hands the pill back to Send. Follow-ups sent mid-run
+     are allowed — the server queues them and runs them after this task. */
   const showStop = isGenerating && Boolean(onStop) && !draft.trim() && attachments.length === 0;
 
   function submit() {
@@ -176,7 +165,7 @@ export function Composer({
           <div className="mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached images">
             {attachments.map((attachment, index) => (
               <div key={`${attachment.name}-${index}`} className="relative size-16 overflow-hidden rounded-xl shadow-[inset_0_0_0_1px_var(--well-outline)]">
-                {!attachment.mime || attachment.mime.startsWith('image/') ? <img src={attachment.dataUrl} alt={attachment.name} className="size-full object-cover" /> : <span className="block p-2 text-[10px] break-all">{attachment.name}</span>}
+                <img src={attachment.dataUrl} alt={attachment.name} className="size-full object-cover" />
                 <button
                   type="button"
                   aria-label={`Remove ${attachment.name}`}
@@ -196,7 +185,11 @@ export function Composer({
           value={draft}
           rows={1}
           disabled={disabled}
-          placeholder={disabled ? 'Your agent is responding…' : placeholder}
+          placeholder={disabled
+            ? 'Your agent is responding…'
+            : isGenerating
+              ? 'Add a follow-up — it will wait for this task…'
+              : placeholder}
           onChange={(event) => onDraftChange(event.target.value)}
           onPaste={onPaste}
           onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -213,7 +206,7 @@ export function Composer({
             tabIndex={-1}
             className="sr-only"
             type="file"
-            accept="image/jpeg,image/png,image/webp,image/gif,text/plain,text/markdown,application/json,.md,.txt,.log,.csv,.ts,.js,.py,.css,.html"
+            accept="image/jpeg,image/png,image/webp,image/gif"
             multiple
             aria-label="Choose images to attach"
             disabled={disabled || processing}
@@ -236,9 +229,7 @@ export function Composer({
               <IconPlus size={17} stroke={2.2} />
             </PopoverTrigger>
             <PopoverContent side="top" align="start" className="w-56 p-1">
-              <MenuItem icon={<IconPaperclip size={15} />} label="Upload file" onClick={() => fileRef.current?.click()} />
-              {onOpenProjectFiles && <MenuItem icon={<IconFolder size={15} />} label="From project files" onClick={onOpenProjectFiles} />}
-              {onOpenLibrary && <MenuItem icon={<IconClipboard size={15} />} label="From context library" onClick={onOpenLibrary} />}
+              <MenuItem icon={<IconPaperclip size={15} />} label="Upload image" onClick={() => fileRef.current?.click()} />
               <MenuItem icon={<IconClipboard size={15} />} label="Paste from clipboard" onClick={() => void pasteFromClipboard()} />
             </PopoverContent>
           </Popover>
