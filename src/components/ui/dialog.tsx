@@ -1,79 +1,121 @@
-import { X } from '@phosphor-icons/react';
-import { createContext, useContext, useEffect, useId, useRef, type HTMLAttributes, type ReactNode } from 'react';
-import { cn } from '@/lib/utils';
+"use client"
 
-interface DialogContextValue {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  titleId: string;
-  descriptionId: string;
+import * as React from "react"
+import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
+
+import { cn } from "@/lib/utils"
+
+function Dialog({ ...props }: DialogPrimitive.Root.Props) {
+  return <DialogPrimitive.Root data-slot="dialog" {...props} />
 }
 
-const DialogContext = createContext<DialogContextValue | null>(null);
-
-function useDialogContext() {
-  const context = useContext(DialogContext);
-  if (!context) throw new Error('Dialog parts must be rendered within <Dialog>.');
-  return context;
+function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {
+  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />
 }
 
-export function Dialog({ open, onOpenChange, children }: { open: boolean; onOpenChange: (open: boolean) => void; children: ReactNode }) {
-  const titleId = useId();
-  const descriptionId = useId();
-  return <DialogContext.Provider value={{ open, onOpenChange, titleId, descriptionId }}>{children}</DialogContext.Provider>;
+function DialogPortal({ ...props }: DialogPrimitive.Portal.Props) {
+  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />
 }
 
-export function DialogContent({ className, children }: { className?: string; children: ReactNode }) {
-  const context = useDialogContext();
-  const dialogRef = useRef<HTMLDialogElement>(null);
+function DialogClose({ ...props }: DialogPrimitive.Close.Props) {
+  return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
+}
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (context.open && !dialog.open) dialog.showModal();
-    else if (!context.open && dialog.open) dialog.close();
-  }, [context.open]);
-
-  function close() {
-    context.onOpenChange(false);
-    if (dialogRef.current?.open) dialogRef.current.close();
-  }
-
+function DialogContent({
+  className,
+  children,
+  keepMounted,
+  dim = true,
+  backdropClassName,
+  ...props
+}: DialogPrimitive.Popup.Props & {
+  /* Keeps the portal in the DOM while closed — heavyweight popups (the
+     search palette) pre-mount their contents so opening is just the
+     entrance animation. */
+  keepMounted?: boolean
+  /* Skip the dimming backdrop for popups that should feel menu-light
+     (pair with modal="trap-focus" on the root so page scroll stays free). */
+  dim?: boolean
+  /* Extra classes for the dimming backdrop — e.g. backdrop-blur-xs for a
+     frosted scrim (the external-link gate). */
+  backdropClassName?: string
+}) {
   return (
-    <dialog
-      ref={dialogRef}
-      data-workbench-dialog=""
-      aria-labelledby={context.titleId}
-      aria-describedby={context.descriptionId}
-      onCancel={(event) => { event.preventDefault(); close(); }}
-      onClose={() => context.onOpenChange(false)}
-      onClick={(event) => {
-        if (event.target !== event.currentTarget) return;
-        const bounds = event.currentTarget.getBoundingClientRect();
-        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close();
-      }}
-      className={cn('fixed left-1/2 top-1/2 m-0 grid max-h-[min(88dvh,760px)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-5 overflow-y-auto rounded-2xl border border-border bg-panel p-0 text-panel-foreground shadow-2xl outline-none backdrop:bg-black/45 backdrop:backdrop-blur-[2px]', className)}
-    >
-      <div className="relative grid gap-5 p-6 sm:p-7">
+    <DialogPortal keepMounted={keepMounted}>
+      {dim && (
+        <DialogPrimitive.Backdrop
+          data-slot="dialog-backdrop"
+          className={cn(
+            "fixed inset-0 z-50 bg-black/40 duration-150 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+            backdropClassName,
+          )}
+        />
+      )}
+      <DialogPrimitive.Popup
+        data-slot="dialog-content"
+        className={cn(
+          "raised fixed top-[22vh] left-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 rounded-xl bg-popover p-4 text-popover-foreground ring-1 ring-border duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          className,
+        )}
+        {...props}
+      >
         {children}
-        <button type="button" aria-label="Close dialog" onClick={close} className="absolute right-4 top-4 inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
-          <X aria-hidden="true" size={18} />
-        </button>
-      </div>
-    </dialog>
-  );
+      </DialogPrimitive.Popup>
+    </DialogPortal>
+  )
 }
 
-export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('grid gap-1.5 pr-8', className)} {...props} />;
+function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-header"
+      className={cn("flex flex-col gap-1", className)}
+      {...props}
+    />
+  )
 }
 
-export function DialogTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  const context = useDialogContext();
-  return <h2 id={context.titleId} className={cn('text-lg font-semibold tracking-tight', className)} {...props} />;
+function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-footer"
+      className={cn("flex justify-end gap-2 pt-4", className)}
+      {...props}
+    />
+  )
 }
 
-export function DialogDescription({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {
-  const context = useDialogContext();
-  return <p id={context.descriptionId} className={cn('text-sm leading-6 text-muted-foreground', className)} {...props} />;
+function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
+  return (
+    <DialogPrimitive.Title
+      data-slot="dialog-title"
+      className={cn("text-sm leading-none font-semibold", className)}
+      {...props}
+    />
+  )
+}
+
+function DialogDescription({
+  className,
+  ...props
+}: DialogPrimitive.Description.Props) {
+  return (
+    <DialogPrimitive.Description
+      data-slot="dialog-description"
+      className={cn("text-sm text-muted-foreground", className)}
+      {...props}
+    />
+  )
+}
+
+export {
+  Dialog,
+  DialogTrigger,
+  DialogPortal,
+  DialogClose,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
 }

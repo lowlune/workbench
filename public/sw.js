@@ -1,5 +1,5 @@
-const CACHE = 'workbench-shell-v5';
-const SHELL = ['/', '/app.css', '/app.js', '/manifest.webmanifest', '/icon.svg'];
+const CACHE = 'workbench-shell-v6';
+const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));

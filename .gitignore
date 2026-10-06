@@ -11,11 +11,7 @@ node_modules/
 wrangler.jsonc
 
 # Runtime data (user content / generated)
-data/model-catalog.json
-data/clips.json
 data/login-failures.json
-data/clips/
-data/inbox/
 
 # Build staging
 public/build-staging/

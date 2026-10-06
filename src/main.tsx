@@ -1,8 +1,8 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import App from '@/App';
-import '@/styles.css';
+import App from '@/workbench-app';
+import '@/styles/whirl/globals.css';
 
 try {
   const savedTheme = localStorage.getItem('workbench-theme');

@@ -85,9 +85,9 @@ function sessionCookie(value, maxAge = SESSION_TTL) {
 }
 
 async function loginAsset(env, assetPath = '/login.html') {
-  const assetUrl = new URL(assetPath, 'http://localhost:8787');
+  const assetUrl = new URL(assetPath, 'http://localhost');
   try {
-    const response = await env.WORKBENCH_API.fetch(new Request(assetUrl, { method: 'GET' }));
+    const response = await env.ASSETS.fetch(new Request(assetUrl, { method: 'GET' }));
     const headers = new Headers(response.headers);
     headers.set('Cache-Control', 'no-store');
     headers.set('X-Content-Type-Options', 'nosniff');
@@ -108,27 +108,16 @@ async function loginAsset(env, assetPath = '/login.html') {
   }
 }
 
-async function proxyStatic(request, env, url) {
-  const target = new URL(`${url.pathname}${url.search}`, 'http://localhost:8787');
-  const headers = new Headers(request.headers);
-  headers.delete('cookie');
-  headers.delete('authorization');
-  headers.delete('host');
-  headers.delete('x-workbench-internal-key');
-  headers.set('x-forwarded-host', url.host);
-  headers.set('x-forwarded-proto', 'https');
-  headers.set('x-workbench-internal-key', env.WORKBENCH_PROXY_KEY);
-  const init = { method: request.method, headers, redirect: 'manual' };
-  if (request.method !== 'GET' && request.method !== 'HEAD') init.body = request.body;
-  try {
-    const response = await env.WORKBENCH_API.fetch(new Request(target, init));
-    if (response.status === 404) return env.ASSETS.fetch(request);
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set('X-Content-Type-Options', 'nosniff');
-    return new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders });
-  } catch {
-    return json({ error: 'Workbench on the VPS is temporarily unavailable.' }, 502);
-  }
+/* The shell, fonts and hashed assets come straight from the edge; only the
+   API and its event stream travel to the VPS. */
+async function staticAsset(request, env, url) {
+  const asset = await env.ASSETS.fetch(request);
+  const headers = new Headers(asset.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'no-referrer');
+  headers.set('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  if (url.pathname === '/' || url.pathname.endsWith('.html')) headers.set('Cache-Control', 'no-cache');
+  return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
 }
 
 async function recordLoginAttempt(request, env, success) {
@@ -252,6 +241,6 @@ export default {
     }
 
     if (path.startsWith('/api/')) return proxyApi(request, env, url);
-    return proxyStatic(request, env, url);
+    return staticAsset(request, env, url);
   },
 };

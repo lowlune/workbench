@@ -1,0 +1,18 @@
+import { DatabaseSync } from 'node:sqlite';
+import { mkdir, cp, readdir, rm } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+const data=process.env.WORKBENCH_DATA||path.resolve(import.meta.dirname,'../data');
+const root=process.env.WORKBENCH_BACKUP_DIR||path.join(os.homedir(),'.local/share/workbench-backups');
+await mkdir(root,{recursive:true,mode:0o700});
+const target=path.join(root,new Date().toISOString().replace(/[:.]/g,'-'));
+await mkdir(target,{mode:0o700});
+const db=new DatabaseSync(path.join(data,'control/workbench.sqlite'),{readOnly:true});
+db.exec(`VACUUM INTO '${path.join(target,'workbench.sqlite').replaceAll("'","''")}'`);db.close();
+await cp(path.join(data,'control/blobs'),path.join(target,'blobs'),{recursive:true});
+await cp(path.join(data,'control/pi/sessions'),path.join(target,'pi-sessions'),{recursive:true}).catch(error=>{if(error.code!=='ENOENT')throw error;});
+const native=new DatabaseSync(path.join(os.homedir(),'.local/share/opencode/opencode.db'),{readOnly:true});
+native.exec(`VACUUM INTO '${path.join(target,'opencode.sqlite').replaceAll("'","''")}'`);native.close();
+const backups=(await readdir(root,{withFileTypes:true})).filter(x=>x.isDirectory()&&/^\d{4}-\d{2}-\d{2}T/.test(x.name)).sort((a,b)=>b.name.localeCompare(a.name));
+for(const old of backups.slice(14))await rm(path.join(root,old.name),{recursive:true});
+console.log(`Workbench snapshot saved: ${target}`);

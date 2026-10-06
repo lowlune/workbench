@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readdir, rename, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,9 +16,20 @@ if (path.dirname(staging) !== publicRoot || path.dirname(publicAssets) !== publi
 }
 
 await mkdir(publicAssets, { recursive: true });
+const stagedNames = new Set();
 for (const entry of await readdir(stagedAssets, { withFileTypes: true })) {
   if (!entry.isFile() || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name)) continue;
   await copyFile(path.join(stagedAssets, entry.name), path.join(publicAssets, entry.name));
+  stagedNames.add(entry.name);
+}
+
+/* Open clients may still request previous lazy chunks. Keep immutable assets
+   for seven days, and switch the index only after all new files exist. */
+for (const entry of await readdir(publicAssets, { withFileTypes: true })) {
+  if (!entry.isFile() || stagedNames.has(entry.name)) continue;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name)) continue;
+  const file = path.join(publicAssets, entry.name);
+  if ((await stat(file)).mtimeMs < Date.now() - 7 * 86400_000) await rm(file, { force: true });
 }
 
 await copyFile(stagedIndex, nextIndex);

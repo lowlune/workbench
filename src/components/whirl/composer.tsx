@@ -1,0 +1,285 @@
+import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  IconArrowUp,
+  IconClipboard,
+  IconFolder,
+  IconLoader2,
+  IconPaperclip,
+  IconPlayerStopFilled,
+  IconPlus,
+  IconX,
+} from '@tabler/icons-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { fileToDataUrl, type Attachment } from '@/lib/attachments';
+import { cn } from '@/lib/utils';
+
+const MAX_ATTACHMENTS = 4;
+
+/* Whirl's composer capsule: a well (frosted while floating over a thread)
+   that hugs the textarea, carries the attachment tray inside the same
+   spring, and keeps its controls pinned to the corners. */
+export function Composer({
+  draft,
+  attachments,
+  onDraftChange,
+  onAttachmentsChange,
+  onSend,
+  onStop,
+  isGenerating = false,
+  disabled = false,
+  sending = false,
+  sendBlocked = false,
+  placeholder = 'Ask anything…',
+  floating = false,
+  focusSignal = 0,
+  onToast,
+  onOpenLibrary,
+  onOpenProjectFiles,
+}: {
+  draft: string;
+  attachments: Attachment[];
+  onDraftChange: (value: string) => void;
+  onAttachmentsChange: (attachments: Attachment[]) => void;
+  onSend: () => Promise<void>;
+  onStop?: () => void;
+  isGenerating?: boolean;
+  disabled?: boolean;
+  /** A send is in flight; the textarea stays editable, only submit waits. */
+  sending?: boolean;
+  /** Typing stays open; only submitting is refused (agent needs approval). */
+  sendBlocked?: boolean;
+  placeholder?: string;
+  floating?: boolean;
+  /** Bump to focus the textarea — "New task" lands the caret here. */
+  focusSignal?: number;
+  onToast: (message: string, isError?: boolean) => void;
+  onOpenLibrary?: () => void;
+  onOpenProjectFiles?: () => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [processing, setProcessing] = useState(false);
+
+  useEffect(() => {
+    const element = textareaRef.current;
+    if (!element) return;
+    element.style.height = 'auto';
+    element.style.height = `${Math.min(element.scrollHeight, 208)}px`;
+  }, [draft]);
+
+  /* Focus when asked, and once more if the composer was still disabled at
+     that moment (the home chips seed the project a render later). Only the
+     latest signal is ever handled, so later enable/disable flips don't steal
+     the caret. */
+  const handledFocusRef = useRef(0);
+  useEffect(() => {
+    if (!focusSignal || handledFocusRef.current === focusSignal) return;
+    const element = textareaRef.current;
+    if (!element || element.disabled) return;
+    handledFocusRef.current = focusSignal;
+    element.focus();
+    element.setSelectionRange(element.value.length, element.value.length);
+  }, [focusSignal, disabled]);
+
+  async function addFiles(files: FileList | File[]) {
+    const incoming = Array.from(files);
+    if (!incoming.length) return;
+    if (attachments.length + incoming.length > MAX_ATTACHMENTS) {
+      onToast(`Attach up to ${MAX_ATTACHMENTS} images at a time.`, true);
+      return;
+    }
+    setProcessing(true);
+    try {
+      const next = [];
+      for (const file of incoming) next.push(await fileToDataUrl(file));
+      onAttachmentsChange([...attachments, ...next]);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Could not read that image.', true);
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+  async function pasteFromClipboard() {
+    if (!window.isSecureContext) {
+      onToast('The system clipboard needs a secure connection.', true);
+      return;
+    }
+    try {
+      if (navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        const files: File[] = [];
+        for (const item of items) {
+          const imageType = item.types.find((type) => type.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            files.push(new File([blob], `clipboard-${Date.now()}.${imageType.split('/')[1]}`, { type: imageType }));
+          }
+        }
+        if (files.length) return void await addFiles(files);
+      }
+      if (navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const element = textareaRef.current;
+          const start = element?.selectionStart ?? draft.length;
+          const end = element?.selectionEnd ?? start;
+          onDraftChange(`${draft.slice(0, start)}${text}${draft.slice(end)}`);
+        }
+        else onToast('The clipboard is empty.', true);
+      } else {
+        onToast('Clipboard access is unavailable in this browser.', true);
+      }
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Clipboard permission was not granted.', true);
+    }
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const images = Array.from(event.clipboardData.items)
+      .filter((item) => item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (images.length) {
+      event.preventDefault();
+      void addFiles(images);
+    }
+  }
+
+  const canSend = !disabled && !sendBlocked && !sending && !processing && Boolean(draft.trim() || attachments.length);
+  /* Whirl's rule: an empty composer while the agent writes offers Stop; the
+     first typed character hands the pill back to Send (Workbench has no
+     queue, so the follow-up goes out immediately, as the old UI did). */
+  const showStop = isGenerating && Boolean(onStop) && !draft.trim() && attachments.length === 0;
+
+  function submit() {
+    if (sendBlocked) {
+      onToast('The agent is waiting for approval — review its output first.', true);
+      return;
+    }
+    if (!canSend) return;
+    void onSend();
+  }
+
+  return (
+    <form
+      onSubmit={(event: FormEvent) => { event.preventDefault(); submit(); }}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => { event.preventDefault(); if (!disabled) void addFiles(event.dataTransfer.files); }}
+      className={cn(
+        'relative rounded-[26px] border border-[var(--well-outline)] transition-shadow duration-150 focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--foreground)_6%,transparent)]',
+        floating ? 'bg-(--well-translucent) backdrop-blur-xl' : 'bg-well',
+      )}
+    >
+      <div className="relative p-2">
+        {attachments.length > 0 && (
+          <div className="mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached images">
+            {attachments.map((attachment, index) => (
+              <div key={`${attachment.name}-${index}`} className="relative size-16 overflow-hidden rounded-xl shadow-[inset_0_0_0_1px_var(--well-outline)]">
+                {!attachment.mime || attachment.mime.startsWith('image/') ? <img src={attachment.dataUrl} alt={attachment.name} className="size-full object-cover" /> : <span className="block p-2 text-[10px] break-all">{attachment.name}</span>}
+                <button
+                  type="button"
+                  aria-label={`Remove ${attachment.name}`}
+                  onClick={() => onAttachmentsChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
+                  className="absolute top-1 right-1 grid size-5 cursor-pointer place-items-center rounded-full bg-black/70 text-white transition-colors hover:bg-black"
+                >
+                  <IconX size={11} stroke={2.5} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <label htmlFor="wb-composer" className="sr-only">Message your agent</label>
+        <textarea
+          id="wb-composer"
+          ref={textareaRef}
+          value={draft}
+          rows={1}
+          disabled={disabled}
+          placeholder={disabled ? 'Your agent is responding…' : placeholder}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onPaste={onPaste}
+          onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          className="field-text block max-h-52 min-h-9 w-full resize-none overflow-y-auto bg-transparent px-1.5 py-1.5 pb-10 caret-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+        />
+        <div className="absolute bottom-2 left-2 flex items-center">
+          <input
+            ref={fileRef}
+            tabIndex={-1}
+            className="sr-only"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif,text/plain,text/markdown,application/json,.md,.txt,.log,.csv,.ts,.js,.py,.css,.html"
+            multiple
+            aria-label="Choose images to attach"
+            disabled={disabled || processing}
+            onChange={(event) => {
+              if (event.target.files?.length) void addFiles(event.target.files);
+              event.target.value = '';
+            }}
+          />
+          <Popover>
+            <PopoverTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Add attachment"
+                  disabled={disabled || processing}
+                  className="grid size-8 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.92] disabled:pointer-events-none disabled:opacity-40"
+                />
+              }
+            >
+              <IconPlus size={17} stroke={2.2} />
+            </PopoverTrigger>
+            <PopoverContent side="top" align="start" className="w-56 p-1">
+              <MenuItem icon={<IconPaperclip size={15} />} label="Upload file" onClick={() => fileRef.current?.click()} />
+              {onOpenProjectFiles && <MenuItem icon={<IconFolder size={15} />} label="From project files" onClick={onOpenProjectFiles} />}
+              {onOpenLibrary && <MenuItem icon={<IconClipboard size={15} />} label="From context library" onClick={onOpenLibrary} />}
+              <MenuItem icon={<IconClipboard size={15} />} label="Paste from clipboard" onClick={() => void pasteFromClipboard()} />
+            </PopoverContent>
+          </Popover>
+        </div>
+        <div className="absolute right-2 bottom-2 flex items-center gap-1.5">
+          {processing && <IconLoader2 size={15} className="animate-spin text-muted-foreground" />}
+          {showStop ? (
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop generating"
+              className="grid size-9 cursor-pointer place-items-center rounded-full bg-well text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.94]"
+            >
+              <IconPlayerStopFilled size={15} />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!canSend}
+              aria-label={sending || disabled ? 'Sending message' : 'Send message'}
+              title={sendBlocked ? 'Review the agent output before sending' : undefined}
+              className="grid size-9 cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,scale,opacity] duration-150 hover:bg-(--primary-hover) active:scale-[0.94] disabled:pointer-events-none disabled:opacity-40"
+            >
+              {sending || disabled ? <IconLoader2 size={16} className="animate-spin" /> : <IconArrowUp size={17} stroke={2.4} />}
+            </button>
+          )}
+        </div>
+      </div>
+    </form>
+  );
+}
+
+function MenuItem({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors duration-100 hover:bg-accent"
+    >
+      <span className="text-muted-foreground">{icon}</span>
+      {label}
+    </button>
+  );
+}
