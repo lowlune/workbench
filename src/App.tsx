@@ -1,20 +1,28 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconClipboardText, IconClock, IconHome, IconLoader2 } from '@tabler/icons-react';
-import { AssistantPanel } from '@/components/whirl/assistant-panel';
+import { AgentsMdDialog } from '@/components/whirl/agents-md-dialog';
+import { ChangesPanel, type ChangesTarget } from '@/components/whirl/changes-panel';
 import { ChatView } from '@/components/whirl/chat-view';
 import { ClipsView } from '@/components/whirl/pages/clips-view';
 import { HistoryView } from '@/components/whirl/pages/history-view';
 import { HomeView } from '@/components/whirl/pages/home-view';
+import { NotificationsCenter } from '@/components/whirl/pages/notifications-center';
 import { RenameDialog } from '@/components/whirl/rename-dialog';
 import { SearchPalette } from '@/components/whirl/search-palette';
 import { useSessionMenu } from '@/components/whirl/session-menu';
-import { Sidebar, type AppView } from '@/components/whirl/sidebar';
+import { Sidebar, type AppView, type CurrentModelChip, type UsageStatusChip } from '@/components/whirl/sidebar';
 import { SystemPanel } from '@/components/whirl/system-panel';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
 import { getModels, getOverview, getSession, getSessionUpdates, getSystem, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
 import type { Attachment } from '@/lib/attachments';
-import type { Agent, Message, Overview, QueuedMessage, Session } from '@/lib/types';
-import { bootstrap, mutate } from '@/lib/workbench';
+import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, UsagePacing, UsageResponse, WorkbenchEvent } from '@/lib/types';
+import {
+  ACTIVE_RUN_STATES, agentInstructionFiles, archivedConversations, attentionOf, bootstrap, health,
+  isRunningSession, isTerminalRunState, mutate, notifications as fetchNotifications, offerings,
+  saveSettings, usagePacing, usageReport,
+} from '@/lib/workbench';
+import { notifyForEvent } from '@/lib/notifications';
 import { cn } from '@/lib/utils';
 
 const UsageView = lazy(() => import('@/components/whirl/pages/usage-view'));
@@ -78,9 +86,61 @@ function mergeSession(previous: Session | undefined, incoming: Session, mode: 'm
   };
 }
 
+/* Streaming text arrives as deltas: patch the one message instead of
+   refetching the whole transcript (§34). */
+function appendDelta(session: Session, messageId: string, delta: string): Session {
+  if (!session.messages) return session;
+  let changed = false;
+  const messages = session.messages.map((message) => {
+    if (message.id !== messageId) return message;
+    changed = true;
+    const parts = message.parts.length ? [...message.parts] : [];
+    let textIndex = -1;
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      if (parts[index].type === 'text') { textIndex = index; break; }
+    }
+    if (textIndex === -1) parts.push({ id: `text_${messageId}`, type: 'text', text: delta });
+    else parts[textIndex] = { ...parts[textIndex], text: (parts[textIndex].text || '') + delta };
+    return { ...message, parts };
+  });
+  return changed ? { ...session, messages } : session;
+}
+
+function patchToolPart(session: Session, toolCallId: string, patch: Partial<NonNullable<MessagePart['state']>>): Session {
+  if (!session.messages) return session;
+  let changed = false;
+  const messages = session.messages.map((message) => {
+    if (!message.parts.some((part) => part.callID === toolCallId)) return message;
+    changed = true;
+    return {
+      ...message,
+      parts: message.parts.map((part) => part.callID === toolCallId
+        ? { ...part, state: { ...(part.state || {}), ...patch } }
+        : part),
+    };
+  });
+  return changed ? { ...session, messages } : session;
+}
+
+function computeUsageStatus(pacing?: UsagePacing, weekly?: UsageResponse): UsageStatusChip | null {
+  if (pacing) {
+    const metric = pacing.tokens?.limit != null ? pacing.tokens
+      : pacing.cost?.limit != null ? pacing.cost
+        : pacing.requests?.limit != null ? pacing.requests
+          : undefined;
+    if (metric) {
+      const percent = metric.percent ?? (metric.limit ? (Number(metric.used || 0) / metric.limit) * 100 : undefined);
+      const period = pacing.period === 'monthly' ? 'Monthly' : pacing.period === 'weekly' ? 'Weekly' : (pacing.period || 'Budget');
+      const suffix = pacing.source === 'manual' ? ' · manual' : pacing.source === 'estimated' ? ' · est.' : '';
+      const label = percent != null ? `${period} ${Math.round(percent)}%${suffix}` : `${period} budget`;
+      return { label, percent: percent ?? undefined, tone: percent == null ? 'ok' : percent >= 100 ? 'over' : percent >= 80 ? 'warn' : 'ok' };
+    }
+  }
+  if (weekly?.totals) return { label: `${weekly.totals.requests} req · 7d`, tone: 'ok' };
+  return null;
+}
+
 const emptyOverview: Overview = { agents: [], sessions: [], directories: [], system: {} };
-const WORKING = new Set(['starting', 'running', 'waiting', 'stopping']);
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted', 'uncertain']);
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -90,14 +150,22 @@ export default function App() {
   const [taskFocusSignal, setTaskFocusSignal] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
   const [renameTarget, setRenameTarget] = useState<Session>();
+  const [deleteTarget, setDeleteTarget] = useState<Session>();
+  const [changesTarget, setChangesTarget] = useState<ChangesTarget | null>(null);
+  const [agentsTarget, setAgentsTarget] = useState<Session | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [maxRunsDraft, setMaxRunsDraft] = useState('2');
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const [sendingSessionId, setSendingSessionId] = useState<string>();
   const [chatConnectionError, setChatConnectionError] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const notifiedRef = useRef<Map<string, number>>(new Map());
+  const archivedOpenRef = useRef(archivedOpen);
 
   const overviewQuery = useQuery({
     queryKey: ['overview'],
@@ -116,6 +184,40 @@ export default function App() {
     retry: 1,
   });
   const bootQuery = useQuery({ queryKey: ['bootstrap'], queryFn: bootstrap, staleTime: 30_000 });
+  const modelsQuery = useQuery({ queryKey: ['model-offerings'], queryFn: offerings, staleTime: 60_000, retry: 1 });
+  const pacingQuery = useQuery({ queryKey: ['usage-pacing'], queryFn: usagePacing, staleTime: 30_000, retry: 1 });
+  const weeklyUsageQuery = useQuery({
+    queryKey: ['usage', '7', ''],
+    queryFn: () => usageReport(7),
+    staleTime: 30_000,
+    enabled: pacingQuery.isFetched && !pacingQuery.data,
+    retry: 1,
+  });
+  const notificationsQuery = useQuery({
+    queryKey: ['notifications'],
+    queryFn: fetchNotifications,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+    retry: 1,
+  });
+  const archivedQuery = useQuery({
+    queryKey: ['archived'],
+    queryFn: archivedConversations,
+    enabled: archivedOpen,
+    staleTime: 15_000,
+    retry: 1,
+  });
+  /* Live capacity for the concurrency setting (§11): how many Runs occupy a
+     worker slot and how many sit in the queue. */
+  const healthQuery = useQuery({
+    queryKey: ['health'],
+    queryFn: health,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+    staleTime: 5_000,
+    retry: 1,
+  });
 
   const agent = overview?.agents.find((item) => item.sessionId === route.sessionId);
   const liveSessionId = route.sessionId;
@@ -132,14 +234,52 @@ export default function App() {
   const draftKey = liveSessionId || 'new-task';
   const draft = drafts[draftKey] || { text: '', attachments: [] };
 
+  const sessions = overview?.sessions || [];
+  const attentionSessions = useMemo(() => sessions.filter((item) => attentionOf(item) !== 'none'), [sessions]);
+  const runningSessions = useMemo(
+    () => sessions.filter((item) => isRunningSession(item) && attentionOf(item) === 'none'),
+    [sessions],
+  );
+
+  const activeSession = session || sessions.find((item) => item.id === route.sessionId);
+  /* A subtle "AGENTS.md active" hint for the open chat (§29); shares its query
+     cache with the dialog. */
+  const agentsIndicatorQuery = useQuery({
+    queryKey: ['agents-md', activeSession?.projectId ?? null, activeSession?.directory ?? ''],
+    queryFn: () => agentInstructionFiles(activeSession?.projectId ?? null, activeSession?.directory ?? null),
+    enabled: route.view === 'chat' && Boolean(activeSession),
+    staleTime: 60_000,
+    retry: 0,
+  });
+  const agentsMdActive = Boolean(agentsIndicatorQuery.data?.files?.some((file) => file.exists && String(file.content || '').trim()));
+  const maxRuns = healthQuery.data?.maxRuns ?? bootQuery.data?.maxRuns ?? 1;
+  const activeRuns = healthQuery.data?.active ?? 0;
+  const queuedRuns = healthQuery.data?.queued ?? 0;
+  const currentModelId = (liveSessionId ? modelSelections[liveSessionId] : undefined)
+    || activeSession?.modelPref
+    || bootQuery.data?.defaults?.[activeSession?.engine || 'pi']
+    || bootQuery.data?.defaults?.opencode
+    || null;
+  const currentOffering = modelsQuery.data?.models.find((model) => model.id === currentModelId);
+  const currentModel: CurrentModelChip | null = currentModelId
+    ? { id: currentModelId, name: currentOffering?.name || currentModelId.split('/').pop() || currentModelId, provider: currentOffering?.provider }
+    : null;
+  const usageStatus = useMemo(
+    () => computeUsageStatus(pacingQuery.data, weeklyUsageQuery.data),
+    [pacingQuery.data, weeklyUsageQuery.data],
+  );
+  const unreadNotifications = notificationsQuery.data?.unread || 0;
+
   const showToast = useCallback((text: string, error = false) => {
     const id = Date.now() + Math.random();
     setToasts((current) => [...current.slice(-2), { id, text, error }]);
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
   }, []);
 
-  /* One SSE stream drives every cache update: targeted message/run patches
-     with debounced invalidations for the aggregates. */
+  useEffect(() => { archivedOpenRef.current = archivedOpen; }, [archivedOpen]);
+
+  /* One SSE stream drives every cache update: targeted message/run/tool/todo
+     patches, with debounced invalidations only for aggregates (§4, §34). */
   useEffect(() => {
     const seq = bootQuery.data?.seq;
     if (seq === undefined) return;
@@ -149,45 +289,207 @@ export default function App() {
       window.clearTimeout(timers[key]);
       timers[key] = window.setTimeout(fn, ms);
     };
+    const patchSession = (id: string, updater: (session: Session) => Session) => {
+      queryClient.setQueryData<{ session: Session }>(['session', id], (current) =>
+        current ? { session: updater(current.session) } : current);
+    };
+    const touchSession = (id?: string | null, ms = 250) => {
+      if (!id) return;
+      schedule(`session:${id}`, () => void queryClient.invalidateQueries({ queryKey: ['session', id] }), ms);
+    };
+    const invalidateOverview = () => schedule('overview', () => void queryClient.invalidateQueries({ queryKey: ['overview'] }));
+    const invalidateUsage = (ms = 800) => {
+      schedule('usage', () => void queryClient.invalidateQueries({ queryKey: ['usage'] }), ms);
+      schedule('usage-pacing', () => void queryClient.invalidateQueries({ queryKey: ['usage-pacing'] }), ms);
+    };
+    const notifyOnce = (key: string, text: string, error = false) => {
+      const now = Date.now();
+      if (now - (notifiedRef.current.get(key) || 0) < 30_000) return;
+      notifiedRef.current.set(key, now);
+      showToast(text, error);
+    };
+    const numberOr = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
     stream.onmessage = (event) => {
-      const data = JSON.parse(event.data) as { seq: number; type: string; conversationId?: string; message?: Message; commandId?: string; status?: string; error?: string | null };
+      let data: WorkbenchEvent;
+      try { data = JSON.parse(event.data) as WorkbenchEvent; }
+      catch { return; }
+      const conversationId = typeof data.conversationId === 'string' ? data.conversationId : undefined;
+      const status = typeof data.status === 'string' ? data.status : undefined;
+
       switch (data.type) {
-        case 'message.updated':
-          if (data.conversationId && data.message) {
-            queryClient.setQueryData<{ session: Session }>(['session', data.conversationId], (current) =>
-              current ? { session: mergeSession(current.session, { id: data.conversationId!, messages: [data.message!] }) } : current);
+        case 'text.delta': {
+          const messageId = typeof data.messageId === 'string' ? data.messageId : undefined;
+          const delta = typeof data.delta === 'string' ? data.delta : '';
+          if (conversationId && messageId && delta) {
+            let patched = false;
+            queryClient.setQueryData<{ session: Session }>(['session', conversationId], (current) => {
+              if (!current) return current;
+              const next = appendDelta(current.session, messageId, delta);
+              patched = next !== current.session;
+              return patched ? { session: next } : current;
+            });
+            if (!patched) touchSession(conversationId, 250);
           }
           return;
-        case 'run.updated':
-          if (data.conversationId) {
-            queryClient.setQueryData<{ session: Session }>(['session', data.conversationId], (current) => {
+        }
+        case 'message.updated': {
+          const message = data.message as Message | undefined;
+          if (conversationId && message) {
+            queryClient.setQueryData<{ session: Session }>(['session', conversationId], (current) =>
+              current ? { session: mergeSession(current.session, { id: conversationId, messages: [message] }) } : current);
+          }
+          return;
+        }
+        case 'tool.started':
+        case 'tool.completed': {
+          const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
+          if (conversationId && toolCallId) {
+            const patch: Partial<NonNullable<MessagePart['state']>> = data.type === 'tool.started'
+              ? { status: 'running', title: typeof data.title === 'string' ? data.title : undefined, input: data.input }
+              : {
+                status: typeof data.status === 'string' ? data.status : 'completed',
+                output: typeof data.summary === 'string' ? data.summary : undefined,
+                error: typeof data.error === 'string' ? data.error : undefined,
+              };
+            let patched = false;
+            queryClient.setQueryData<{ session: Session }>(['session', conversationId], (current) => {
               if (!current) return current;
-              const run = current.session.activeRun;
-              const nextRun = run && run.id === data.commandId
-                ? { ...run, status: data.status!, error: data.error }
-                : { id: data.commandId!, status: data.status!, error: data.error, model: current.session.modelPref || '' };
-              return { session: { ...current.session, activeRun: nextRun, resumeStatus: WORKING.has(data.status!) ? 'working' : 'idle' } };
+              const next = patchToolPart(current.session, toolCallId, patch);
+              patched = next !== current.session;
+              return patched ? { session: next } : current;
+            });
+            if (!patched) touchSession(conversationId, 300);
+          }
+          return;
+        }
+        case 'todo.updated': {
+          const todos = Array.isArray(data.todos) ? data.todos : undefined;
+          if (conversationId && todos) {
+            patchSession(conversationId, (current) => ({ ...current, todos: todos as Session['todos'] }));
+          }
+          return;
+        }
+        case 'run.state':
+        case 'run.updated': {
+          const runId = typeof data.runId === 'string' ? data.runId
+            : typeof data.commandId === 'string' ? data.commandId : undefined;
+          const nextStatus = status || 'running';
+          const attention: Attention = nextStatus === 'waiting_for_permission' ? 'permission'
+            : (nextStatus === 'waiting' || nextStatus === 'waiting_for_user') ? 'waiting' : 'none';
+          if (conversationId) {
+            patchSession(conversationId, (current) => {
+              const run = current.activeRun;
+              const nextRun = {
+                id: runId || run?.id || '',
+                status: nextStatus,
+                error: (data.error as string | null | undefined) ?? run?.error ?? null,
+                model: (typeof data.model === 'string' && data.model) || run?.model || current.modelPref || '',
+                started: (typeof data.started === 'number' ? data.started : run?.started) ?? null,
+                ended: (typeof data.ended === 'number' ? data.ended : run?.ended) ?? null,
+                usage: run?.usage ?? null,
+              };
+              return {
+                ...current,
+                activeRun: nextRun,
+                runStatus: nextStatus,
+                attention,
+                resumeStatus: ACTIVE_RUN_STATES.has(nextStatus) ? 'working' : 'idle',
+              };
+            });
+            if (attention !== 'none') {
+              notifyOnce(`attention:${conversationId}`, attention === 'permission' ? 'A run needs your permission.' : 'A run is waiting for your input.');
+            }
+          }
+          if (isTerminalRunState(nextStatus)) {
+            touchSession(conversationId, 150);
+            invalidateOverview();
+            invalidateUsage();
+          }
+          return;
+        }
+        case 'run.completed': {
+          if (conversationId) {
+            patchSession(conversationId, (current) => {
+              const run = current.activeRun;
+              const nextStatus = status || 'completed';
+              return {
+                ...current,
+                attention: 'none',
+                runStatus: nextStatus,
+                resumeStatus: 'idle',
+                activeRun: run ? { ...run, status: nextStatus, ended: Date.now() } : run,
+              };
+            });
+            touchSession(conversationId, 150);
+          }
+          invalidateOverview();
+          invalidateUsage();
+          return;
+        }
+        case 'attention.changed': {
+          const attention = (typeof data.attention === 'string' ? data.attention : 'none') as Attention;
+          if (conversationId) {
+            patchSession(conversationId, (current) => ({ ...current, attention }));
+            if (attention !== 'none') {
+              notifyOnce(`attention:${conversationId}`, attention === 'permission' ? 'A run needs your permission.' : 'A run is waiting for your input.');
+            }
+          }
+          invalidateOverview();
+          return;
+        }
+        case 'usage.updated': {
+          if (conversationId) {
+            const usage = {
+              input: numberOr(data.input),
+              output: numberOr(data.output),
+              cacheRead: numberOr(data.cacheRead),
+              cacheWrite: numberOr(data.cacheWrite),
+              cost: typeof data.cost === 'number' ? data.cost : null,
+            };
+            patchSession(conversationId, (current) => {
+              const run = current.activeRun;
+              return run ? { ...current, activeRun: { ...run, usage } } : current;
             });
           }
-          if (TERMINAL.has(data.status || '')) {
-            if (data.conversationId) schedule(`session:${data.conversationId}`, () => void queryClient.invalidateQueries({ queryKey: ['session', data.conversationId] }));
-            schedule('overview', () => void queryClient.invalidateQueries({ queryKey: ['overview'] }));
-            schedule('usage', () => void queryClient.invalidateQueries({ queryKey: ['usage'] }), 800);
-          }
+          invalidateUsage(1_000);
           return;
+        }
+        case 'notification.created': {
+          void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+          const title = typeof data.title === 'string' ? data.title : 'Workbench';
+          const body = typeof data.body === 'string' ? data.body : undefined;
+          const kind = typeof data.kind === 'string' ? data.kind : '';
+          notifyForEvent({ kind, title, body });
+          return;
+        }
+        case 'model.changed': {
+          if (conversationId) touchSession(conversationId, 200);
+          schedule('bootstrap', () => void queryClient.invalidateQueries({ queryKey: ['bootstrap'] }));
+          schedule('model-offerings', () => void queryClient.invalidateQueries({ queryKey: ['model-offerings'] }));
+          return;
+        }
+        case 'file.changed':
+        case 'file.read':
+        case 'command.started':
+        case 'command.completed':
+        case 'test.completed':
+        case 'git.diff.updated':
+          touchSession(conversationId, 300);
+          return;
+        case 'conversation.changed':
+          invalidateOverview();
+          schedule('history', () => void queryClient.invalidateQueries({ queryKey: ['history'] }));
+          touchSession(conversationId, 150);
+          if (archivedOpenRef.current) schedule('archived', () => void queryClient.invalidateQueries({ queryKey: ['archived'] }));          return;
         case 'command.accepted':
         case 'interaction.created':
         case 'interaction.answered':
-          if (data.conversationId) schedule(`session:${data.conversationId}`, () => void queryClient.invalidateQueries({ queryKey: ['session', data.conversationId] }));
-          schedule('overview', () => void queryClient.invalidateQueries({ queryKey: ['overview'] }));
-          return;
-        case 'conversation.changed':
-          schedule('overview', () => void queryClient.invalidateQueries({ queryKey: ['overview'] }));
-          schedule('history', () => void queryClient.invalidateQueries({ queryKey: ['history'] }));
-          if (data.conversationId) schedule(`session:${data.conversationId}`, () => void queryClient.invalidateQueries({ queryKey: ['session', data.conversationId] }));
+          touchSession(conversationId, 150);
+          invalidateOverview();
           return;
         case 'projects.changed':
-          schedule('overview', () => void queryClient.invalidateQueries({ queryKey: ['overview'] }));
+          invalidateOverview();
           schedule('bootstrap', () => void queryClient.invalidateQueries({ queryKey: ['bootstrap'] }));
           return;
         case 'clips.changed':
@@ -195,6 +497,7 @@ export default function App() {
           return;
         case 'models.changed':
           void queryClient.invalidateQueries({ queryKey: ['models'] });
+          void queryClient.invalidateQueries({ queryKey: ['model-offerings'] });
           return;
         case 'resync':
           void queryClient.invalidateQueries();
@@ -207,7 +510,7 @@ export default function App() {
       stream.close();
       for (const timer of Object.values(timers)) window.clearTimeout(timer);
     };
-  }, [bootQuery.data?.seq, queryClient]);
+  }, [bootQuery.data?.seq, queryClient, showToast]);
 
   const navigate = useCallback((view: Exclude<AppView, 'chat'>, directory?: string | null, replace = false) => {
     if (route.view !== 'chat') setPreviousView(route.view);
@@ -229,20 +532,54 @@ export default function App() {
     if (selected.sessionId) openSession({ id: selected.sessionId, title: selected.sessionTitle || selected.title, directory: selected.cwd, live: true, status: selected.status });
   }, [openSession]);
 
+  const openConversationById = useCallback((conversationId: string) => {
+    const known = overview?.sessions.find((item) => item.id === conversationId);
+    openSession(known || { id: conversationId, title: 'Conversation', live: true });
+  }, [overview, openSession]);
+
   const openNewTask = useCallback(() => {
     setDrafts((current) => ({ ...current, 'new-task': { text: '', attachments: [] } }));
     navigate('home');
     setTaskFocusSignal((signal) => signal + 1);
   }, [navigate]);
 
+  async function archiveSession(target: Session, archived: boolean) {
+    try {
+      await setSessionMeta(target.id, { hidden: archived });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      if (archivedOpen) await queryClient.invalidateQueries({ queryKey: ['archived'] });
+      if (route.sessionId === target.id) navigate('home');
+      showToast(archived ? 'Conversation archived.' : 'Conversation restored.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not archive the conversation.', true);
+    }
+  }
+
+  async function deleteSession(target: Session) {
+    try {
+      await mutate(`/conversations/${encodeURIComponent(target.id)}`, undefined, 'DELETE');
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      if (archivedOpen) await queryClient.invalidateQueries({ queryKey: ['archived'] });
+      if (route.sessionId === target.id) navigate('home');
+      showToast('Conversation deleted.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not delete the conversation.', true);
+    }
+  }
+
   const { openSessionMenu, openSessionMenuAt, sessionMenuElement } = useSessionMenu({
     onOpen: openSession,
     onStop: handleSessionStop,
-    onRename: (session) => setRenameTarget(session),
-    onRegenerate: (session) => void regenerateTitle(session),
-    onPin: (session) => void updateSessionMeta(session, { pinned: !session.pinned }),
-    onHide: (session) => void updateSessionMeta(session, { hidden: true }),
+    onRename: (selected) => setRenameTarget(selected),
+    onRegenerate: (selected) => void regenerateTitle(selected),
+    onPin: (selected) => void updateSessionMeta(selected, { pinned: !selected.pinned }),
+    onArchive: (selected) => void archiveSession(selected, true),
+    onUnarchive: (selected) => void archiveSession(selected, false),
+    onDelete: (selected) => setDeleteTarget(selected),
     onToast: showToast,
+    onViewChanges: openChangesForSession,
+    onOpenAgentsMd: (selected) => setAgentsTarget(selected),
+    onOpenSettings: () => openSettingsForSession(),
   });
 
   useEffect(() => {
@@ -343,7 +680,6 @@ export default function App() {
         session: { ...cached.session, resumeStatus: 'working' },
       }) : cached);
       updateDraft({ text: '', attachments: [] }, sessionId);
-      showToast('Message sent.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not send your message.', true);
     } finally { setSendingSessionId(undefined); }
@@ -480,6 +816,49 @@ export default function App() {
     }));
   }
 
+  function isSessionRunActive(target: Session) {
+    const state = target.activeRun?.status || target.runStatus;
+    return Boolean(state && ACTIVE_RUN_STATES.has(String(state)));
+  }
+
+  function openChangesForSession(target: Session) {
+    setChangesTarget({
+      runId: target.activeRun?.id,
+      conversationId: target.id,
+      runActive: isSessionRunActive(target),
+      title: target.title || 'Run changes',
+    });
+  }
+
+  function openChangesForRun(runId: string, active: boolean) {
+    setChangesTarget({
+      runId,
+      conversationId: liveSessionId,
+      runActive: active,
+      title: session?.title || activeSession?.title || 'Run changes',
+    });
+  }
+
+  function openSettingsForSession() {
+    setMaxRunsDraft(String(maxRuns));
+    setSettingsOpen(true);
+  }
+
+  async function applyMaxRuns() {
+    const value = Math.max(1, Math.min(16, Math.round(Number(maxRunsDraft) || 1)));
+    try {
+      await saveSettings({ maxRuns: value });
+      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
+      await queryClient.invalidateQueries({ queryKey: ['health'] });
+      showToast(`Concurrency limit set to ${value}.`);
+      setSettingsOpen(false);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save the concurrency limit.', true);
+    }
+  }
+
+  const toggleArchived = useCallback((open: boolean) => setArchivedOpen(open), []);
+
   const queued: QueuedMessage[] = (session?.queued || []).map((item) => ({
     id: item.id,
     text: item.text,
@@ -501,12 +880,22 @@ export default function App() {
         systemOpen={systemOpen}
         theme={theme}
         shortcutLabel={taskShortcut}
+        running={runningSessions}
+        attention={attentionSessions}
+        currentModel={currentModel}
+        usageStatus={usageStatus}
+        unreadNotifications={unreadNotifications}
+        archived={archivedQuery.data?.sessions}
+        archivedLoading={archivedQuery.isPending && archivedOpen}
         onNavigate={(view) => navigate(view)}
         onOpenSession={openSession}
         onOpenAgent={openAgentChat}
         onNewTask={openNewTask}
         onSearch={() => setSearchOpen(true)}
         onOpenSystem={() => setSystemOpen(true)}
+        onOpenUsage={() => navigate('usage')}
+        onOpenNotifications={() => setNotificationsOpen(true)}
+        onToggleArchived={toggleArchived}
         onToggleTheme={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
         onContextMenu={openSessionMenu}
         onMenuAt={openSessionMenuAt}
@@ -548,7 +937,6 @@ export default function App() {
               memoryFree={overview?.system?.memoryFree}
               selectedModel={liveSessionId ? modelSelections[liveSessionId] || session?.modelPref || undefined : undefined}
               onSelectModel={(model) => void changeModel(model)}
-              onAsk={() => setAssistantOpen(true)}
               onDraftChange={(text) => updateDraft({ text })}
               onAttachmentsChange={(attachments) => updateDraft({ attachments })}
               onSend={sendPrompt}
@@ -558,6 +946,9 @@ export default function App() {
               onNewTask={openNewTask}
               onToast={showToast}
               onReplaceSession={replaceSession}
+              onViewChanges={openChangesForRun}
+              onOpenAgentsMd={() => { if (activeSession) setAgentsTarget(activeSession); }}
+              agentsMdActive={agentsMdActive}
             />
           ) : route.view === 'history' ? (
             <HistoryView
@@ -631,14 +1022,74 @@ export default function App() {
         onStopAgent={(selected) => void stopAgent(selected)}
         onToast={showToast}
       />
-      <AssistantPanel
-        open={assistantOpen}
-        onOpenChange={setAssistantOpen}
-        sessionId={route.sessionId}
-        sessionTitle={session?.title || undefined}
+      <NotificationsCenter
+        open={notificationsOpen}
+        onOpenChange={setNotificationsOpen}
+        onOpenConversation={openConversationById}
         onToast={showToast}
       />
       {sessionMenuElement}
+      {changesTarget && (
+        <ChangesPanel
+          open
+          onOpenChange={(open) => { if (!open) setChangesTarget(null); }}
+          target={changesTarget}
+          onToast={showToast}
+          onChanged={() => {
+            if (changesTarget.conversationId) void queryClient.invalidateQueries({ queryKey: ['session', changesTarget.conversationId] });
+            void queryClient.invalidateQueries({ queryKey: ['overview'] });
+          }}
+        />
+      )}
+      {agentsTarget && (
+        <AgentsMdDialog
+          open
+          onOpenChange={(open) => { if (!open) setAgentsTarget(null); }}
+          projectId={agentsTarget.projectId}
+          projectName={projects.find((project) => project.id === agentsTarget.projectId)?.name}
+          path={agentsTarget.directory}
+          onToast={showToast}
+        />
+      )}
+      {settingsOpen && (
+        <Dialog open onOpenChange={(open) => { if (!open) setSettingsOpen(false); }}>
+          <DialogContent className="top-[24vh] max-w-sm rounded-2xl">
+            <DialogTitle>Concurrency & queue</DialogTitle>
+            <DialogDescription>
+              How many Runs may execute at once. Extra Runs wait in the queue. Currently {activeRuns} running · {queuedRuns} queued.
+            </DialogDescription>
+            <div className="mt-4">
+              <label htmlFor="wb-max-runs" className="text-[12px] font-medium text-muted-foreground">Maximum concurrent Runs</label>
+              <input
+                id="wb-max-runs"
+                type="number"
+                min={1}
+                max={16}
+                value={maxRunsDraft}
+                onChange={(event) => setMaxRunsDraft(event.target.value)}
+                className="mt-1.5 w-full rounded-xl bg-well px-3 py-2 text-[13px] tabular-nums shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none"
+              />
+              <p className="mt-1.5 text-[11px] text-muted-foreground">Default 2. Higher values need more memory on this machine.</p>
+            </div>
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="cursor-pointer rounded-full px-3.5 py-2 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyMaxRuns()}
+                className="cursor-pointer rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96]"
+              >
+                Save
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
       {renameTarget && (
         <RenameDialog
           open
@@ -650,6 +1101,36 @@ export default function App() {
             if (target) void updateSessionMeta(target, { title });
           }}
         />
+      )}
+      {deleteTarget && (
+        <Dialog open onOpenChange={(open) => { if (!open) setDeleteTarget(undefined); }}>
+          <DialogContent className="top-[24vh] max-w-sm rounded-2xl">
+            <DialogTitle>Delete conversation?</DialogTitle>
+            <DialogDescription>
+              “{deleteTarget.title || 'Untitled'}” and its transcript will be removed. This cannot be undone.
+            </DialogDescription>
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(undefined)}
+                className="cursor-pointer rounded-full px-3.5 py-2 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = deleteTarget;
+                  setDeleteTarget(undefined);
+                  if (target) void deleteSession(target);
+                }}
+                className="cursor-pointer rounded-full bg-destructive px-3.5 py-2 text-[13px] font-medium text-white transition-[background-color,scale] duration-150 hover:opacity-90 active:scale-[0.96]"
+              >
+                Delete
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
       <SearchPalette
         open={searchOpen}

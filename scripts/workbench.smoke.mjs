@@ -8,6 +8,13 @@ async function api(route,body,method){const response=await fetch(base+route,{hea
 const boot=await api('/bootstrap');assert.ok(boot.projects.length);console.log('bootstrap',boot.sessions.length,'root conversations',boot.projects.length,'projects');
 const {models}=await api('/models');for(const engine of ['opencode','pi'])assert.ok(models.some(m=>m.engine===engine),`${engine} has models`);
 console.log('models',models.reduce((out,m)=>(out[m.engine]=(out[m.engine]||0)+1,out),{}));
+/* Pi is the default engine (PLAN §1.1): a conversation created without `engine`
+   must come back as pi, and the bootstrap advertises pi as the default. */
+assert.equal(boot.defaultEngine,'pi');
+const defaultChat=await api('/conversations',{id:`chat_${randomUUID()}`,title:'Default engine smoke',projectId:null,mode:'plan'});
+assert.equal(defaultChat.session.engine,'pi');
+await api(`/conversations/${defaultChat.session.id}`,{hidden:true},'PATCH');
+console.log('default engine PASS pi');
 const ids=[];
 for(const engine of ['opencode','pi']){
   const model=models.find(m=>m.engine===engine&&m.id==='opencode-go/deepseek-v4-flash')||models.find(m=>m.engine===engine&&m.provider==='opencode-go');
@@ -20,9 +27,9 @@ for(const engine of ['opencode','pi']){
 }
 for(const item of ids){
   const deadline=Date.now()+180000;let status;
-  while(Date.now()<deadline){status=(await api(`/commands/${item.commandId}`)).status;if(['succeeded','failed','uncertain','interrupted','cancelled'].includes(status))break;await new Promise(r=>setTimeout(r,1500));}
+  while(Date.now()<deadline){status=(await api(`/commands/${item.commandId}`)).status;if(['completed','failed','cancelled','interrupted','interrupted_by_restart'].includes(status))break;await new Promise(r=>setTimeout(r,1500));}
   const {session}=await api(`/conversations/${item.id}`);
-  assert.equal(status,'succeeded',`${item.engine}: ${session.activeRun?.error}`);
+  assert.equal(status,'completed',`${item.engine}: ${session.activeRun?.error}`);
   assert.equal(session.messages.filter(m=>m.info.role==='user').length,1);
   assert.ok(session.messages.some(m=>m.info.role==='assistant'&&m.parts.some(p=>p.text?.includes(`WORKBENCH_${item.engine.toUpperCase()}_OK`))),`${item.engine} reply is persisted`);
   console.log('runtime PASS',item.engine,session.messages.length,'messages');

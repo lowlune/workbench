@@ -1,236 +1,306 @@
-# PLAN: Návrat pôvodného UI (Whirl console) na nový backend
+# PLAN: Pi-first refactor self-hosted AI coding dashboardu
 
 **Dátum:** 6. október 2026
 **Repozitár:** `~/projects/Workbench`
-**Zadanie od používateľa (verbatim):**
-
-> vráť všetky zmeny čo si urobil ohladom UI. UI bolo predtým lepšie aj layout
-> aj obsah aj ten performance panel atď. jediné čo je teraz lepšie je usage.
-> technicky to nechaj ale vráť UI nech je ako predtýmito zmenami.
-
----
-
-## 1. Rozhodnutie
-
-Obnoviť **pôvodné Whirl konzolové UI** (stav z 5. 10. 2026 — to, ktoré používateľ
-reálne videl v produkcii: sidebar, home s chipmi, chat, history, clips, search
-palette, session menu, **performance/system panel**, rename dialog, Ask panel)
-a napojiť ho na **nový v2 control plane**. Zvyšok technickej práce (headless
-OpenCode/Pi runtimes, SQLite, command queue, SSE, usage ledger, scheduler,
-opravy SSE/gateway/systemd) zostáva bez zmien.
-
-### Čo sa zachováva z novej práce
-- `src/components/whirl/pages/usage-view.tsx` (nový Usage & models — používateľ ho chce)
-- `src/components/whirl/model-picker.tsx` (používa ho usage-view pre defaulty)
-- `src/components/whirl/interaction-card.tsx` (permission/question karty — v2 ich potrebuje)
-- `src/components/whirl/thread/*`, `markdown.tsx`, `message-action-button.tsx` (prežili)
-- Backend: `server.js` gateway, `server/control.mjs`, `server/runtimes.mjs`,
-  `server/store.mjs`, `server/titles.mjs`, SSE, queue, changes artifact, titulky.
-
-### Čo sa odstraňuje (moje nové UI, ktoré používateľ nechce)
-- `src/workbench-app.tsx`, `src/components/whirl/editor.tsx`,
-  `src/components/whirl/thread/run-card.tsx`,
-  `src/components/whirl/project-files-dialog.tsx`,
-  `src/components/whirl/pages/context-library.tsx`
-- Live output (Herdr neexistuje) a "Ready to continue" stavové texty.
-
-### Zdroje pôvodných zdrojákov
-1. `/tmp/opencode/recovered/**` — rekonštruované z opencode session DB (tool
-   write/edit calls pred 6. 10. 2026). Použiteľné pre všetky zmazané komponenty:
-   `chat-view.tsx` (320), `sidebar.tsx` (287, mierny drift v SessionRow — treba
-   skontrolovať), `system-panel.tsx` (206), `pages/home-view.tsx` (255),
-   `pages/history-view.tsx` (133), `pages/clips-view.tsx` (141),
-   `search-palette.tsx` (131), `session-menu.tsx` (140), `dialogs.tsx` (69),
-   `model-menu.tsx` (139), `rename-dialog.tsx` (76), `assistant-panel.tsx` (168),
-   `App.tsx` (673; data-layer sa aj tak prepisuje na v2).
-2. `git show 86fcdd3:<path>` — staršia kompletná verzia UI (App.tsx,
-   src/features/*, components/app-sidebar.tsx) vhodná na krížovú kontrolu.
-3. Aktuálny repo — prežívajúce komponenty: `chat-row.tsx`, `home-intro.tsx`,
-   `markdown.tsx`, `message-action-button.tsx`, `interaction-card.tsx`,
-   `thread/*` (thread-view 148 riadkov je finálny), `styles/whirl/*` (CSS prežil),
-   `lib/utils.ts` (formátovacie helpery prežili).
+**Zadanie:** kompletne prerobiť existujúci dashboard na Pi-first produkt: chat-first,
+rýchly, spoľahlivý, resumovateľný, observovateľný, s paralelnými behmi a bez
+terminálovej orchestrace. Tento dokument je štruktúrovaná transkripcia zadania
+(46 bodov) + audit súčasného stavu + fázy + rozdelenie práce pre 4 agentov.
 
 ---
 
-## 2. Cieľová architektúra
+## 0. Zásady
 
-```text
-Browser
- ├─ App.tsx (obnovený shell: sidebar, home, chat, history, clips, usage,
- │            system panel, search palette, session menu, dialogs)
- ├─ SSE /api/v2/events → cielené aktualizácie TanStack cache
- ├─ server queue (v2 commands) namiesto klientského outboxu
- └─ lib/api.ts = ADAPTER: pôvodné signatúry, implementácia cez /api/v2
-                 │
-Gateway (server.js) → /api/v2/* → Control (SQLite, runtimes)
+Priorita nie je počet funkcií, ale: **fast, simple, reliable, resumable,
+observable, efficient, intuitive**. Žiadne microservices/K8s/distributed
+abstractions (§44). Rozhodnutia robia inžinieri; otázky len pri nebezpečnej
+nejasnosti (§43).
+
+Cieľová architektúra v jednom diagrame (§47):
+
+```
+Dashboard / Chat UI
+      ↓
+Durable control plane + state (SQLite)
+      ↓
+Pi agent harness  (univerzálny)
+      ↓
+selected provider/model  (replaceable)
+      ↓
+structured tools
+      ↓
+project / isolated Git workspace
 ```
 
-- **Live output sa neobnovuje** (Herdr je preč, `getAgentOutput` nebude volaný).
-- **"Ready to continue" pill sa neobnovuje**; namiesto neho tichý stav
-  ("Working" / nič). `statusLabel` môže ostať pre iné stavy, ale `idle` nesmie
-  renderovať "Ready to continue".
-- **"agents" v Overview**: bežiace konverzácie (`resumeStatus === 'working'`)
-  mapované na `Agent` tvar s `paneId = conversationId`, aby sidebar "LIVE"
-  sekcia fungovala. Žiadne Herdr panes.
-- **Queue**: serverová (`session.queued`), composer posiela follow-up hneď;
-  fronta sa zobrazuje v chate (remove, model, pause/resume) — prevzaté z novej
-  logiky, ale v starom vizuáli.
+- **Chat** = trvalá konverzácia (bez živého procesu).
+- **Run** = jedna aktivácia Pi (durable záznam).
+- **Worker** = dočasný proces vykonávajúci Run (disposable).
+- **Workspace** = filesystem/Git stav.
+- **Provider/model** = vymeniť ​ľná inteligencia.
+- **Pi** = jediný agent harness.
+
+## 1. Rozhodnutia tohto kola (implementovať teraz)
+
+1. **Pi je primárny a univerzálny harness.** Nové chaty štandardne `engine='pi'`.
+   OpenCode runtime zostáva len ako „advanced/debug" adapter a NIE je na
+   kritickej ceste (dočasná kompatibilita, neskôr odstrániť — §42).
+2. **Žiadne CLI/TUI/terminal scraping.** Pi sa používa programaticky cez SDK
+   (`createAgentSession`, `SessionManager`, `defineTool`, extension API,
+   tool factories) v `server/pi-runner.mjs`; terminál ostáva len ako
+   voliteľný „Advanced terminal" mimo stavu chatu.
+3. **Worker = per-Run child proces, ktorý po Run zanikne.** Chat/transcript
+   žije v control plane (SQLite + Pi `SessionManager` súbory), nie v procese.
+4. **Control plane je jediný zdroj pravdy** pre Chat, Runs, eventy, usage,
+   approvals, TODOs, worktrees.
+5. **Paralelné Runy** s konfigurovateľným limitom (`WORKBENCH_MAX_RUNS`,
+   default 1 → používateľ si zvýši), fronta viditeľná.
+6. **Git worktree izolácia** pre mutujúce Runy v projektoch; read-only Runy
+   bežia bez worktree (§13).
+7. **Štruktúrované eventy** namiesto terminálu: text.delta, tool.* (typed),
+   todo.updated, question.required, permission.required, usage.updated,
+   run.state, file.changed, git.diff.updated, test.completed, run.completed.
+8. **Model/provider je viditeľný a prepínateľný**; zmena počas chatu vytvorí
+   trvalý systémový event a budúce Runy použijú nový model; staré správy si
+   držia model, ktorý ich vytvoril.
+9. **Notifikácie**: in-app „attention" stavy + SSE; browser notifications
+   voliteľne; SMTP je odložené (len preferencia a async hook, nesmie blokovať Run).
+10. **AGENTS.md**: globálny + projektový, detekcia nested, read/edit v UI,
+    Pi dostane applicable inštrukcie do kontextu (`loadProjectContextFiles`).
+11. **Usage pacing**: manuálne limity/rozpočty + provider-reported kde existuje;
+    jasne rozlíšiť reported/estimated/manual; žiadne vymyslené provider limity.
+12. **Odstrániť mŕtvy kód** starej architektúry po migrácii (Herdr už je preč;
+    OpenCode endpoints skryť z bežného UI).
+
+## 2. Audit súčasného stavu
+
+| Oblasť | Stav | Verdikt |
+|---|---|---|
+| Gateway `server.js` | auth + `/api/v2` proxy + statika | **KEEP** |
+| Control `server/control.mjs` | SQLite, commands(=runs), SSE, scheduler (jeden globálny run), usage, clips, projekty | **REFACTOR** (Pi default, run lifecycle, worktrees, notifikácie, usage limity) |
+| Store `server/store.mjs` | conversations/commands/messages/events/usage/clips/attachments/interactions/artifacts/FTS | **REFACTOR** (migrácie: worktree, todos, attention, run metadata) |
+| OpenCode runtime | headless `opencode serve`, eventy + polling | **KEEP ako advanced/debug**, mimo default cesty |
+| Pi runtime `server/runtimes.mjs` + `server/pi-runner.mjs` | SDK (`createAgentSession`, `SessionManager`, `session.subscribe`, `waitForIdle`) | **REFACTOR na hlavný harness** (typed events, tools, questions/permissions, todo) |
+| UI Whirl (`App.tsx`, `chat-view`, `sidebar`, `thread/*`, `composer`, `model-menu`, `usage-view`, `system-panel`, …) | obnovené pôvodné UI na v2 | **KEEP + EXTEND** |
+| `/assistant` + Ask panel | read-only chat | **KEEP** (sekundárne) |
+| Herdr/TUI | odstránené | **DONE** |
+| Notifications | len toasty | **REPLACE** (attention centrum + browser) |
+| Usage | ledger + dashboard | **EXTEND** (limity, pacing, provider usage) |
+| Worktrees | žiadne | **ADD** |
+| TODO/ETA/attention | žiadne | **ADD** |
+| File references/viewer | žiadne | **ADD** |
+| Conversation nav strip | žiadne | **ADD** |
+| AGENTS.md | žiadne | **ADD** |
+
+Pi SDK 0.87.1 poskytuje: `createAgentSession`, `AgentSession`, `SessionManager`,
+`ModelRuntime`, `DefaultResourceLoader`, tool factories (`createReadTool`,
+`createEditTool`, `createBashTool`, `createGrepTool`, `createFindTool`,
+`createLsTool`, `createCodingTools`, `createReadOnlyTools`), `defineTool`,
+extension API (`ExtensionRunner`, `discoverAndLoadExtensions`),
+`loadProjectContextFiles`, `renderDiff`, `generateUnifiedPatch`,
+`serializeConversation`, `calculateContextTokens`, `getLastAssistantUsage`.
+Presné kontrakty pre tools/permissions/questions musí overiť Agent A spikeom.
+
+## 3. Dátový model (rozšírenia)
+
+Existujúce tabuľky sa migrujú (nie rušia). Pribudne:
+
+- `runs` (alebo rozšírené `commands`): stav podľa §9 (queued, starting,
+  running, waiting_for_user, waiting_for_permission, interrupting, interrupted,
+  completed, failed, cancelled, interrupted_by_restart), `engine`, `model`,
+  `provider`, `worktree`, `todos` (JSON), `attention`, `heartbeat`, `eta_low/high`,
+  `usage` summary, `started/ended`.
+- `run_events`: typed events pre UI (kind + payload + seq) — buď nová tabuľka,
+  alebo rozšírenie `events` o `kind`/`run_id`.
+- `workspaces`: `id, project_id, run_id, path, branch, base_branch, base_commit,
+  status(applied|discarded|conflict|active)`.
+- `questions` / `approvals`: už `interactions`; rozšíriť o `options`,
+  `answers`, `run_id`, `status`.
+- `agent_instructions`: `scope(global|project), project_id, path, content,
+  revision, active`.
+- `usage_limits`: `scope(provider|global), period(weekly|monthly), limit_tokens,
+  limit_cost, reset_at, manual`.
+- `notifications`: `id, kind, severity, conversation_id, run_id, title, body,
+  read, created, delivered`.
+- `settings`: existuje key/value — použiť pre preferencie notifikácií a defaulty.
+
+Zachovať jednoduchosť: preferovať rozšírenie existujúcich tabuliek pred
+novými vrstvami.
+
+## 4. Eventy a SSE (kontrakt pre frontend)
+
+Jeden multiplexovaný `/api/v2/events` (SSE) s `seq`, `type`, `conversationId`,
+`runId`. Typy (najdôležitejšie):
+
+```
+run.state            { status, previous, model, provider, started, ended, error }
+text.delta           { messageId, delta }
+message.updated      { message }
+tool.started         { toolCallId, kind, title, input? }
+tool.completed       { toolCallId, kind, status, summary, artifactId? }
+file.changed         { path, change: created|modified|deleted, additions, deletions }
+file.read            { path }
+command.started/completed { command, exitCode?, summary }
+test.completed       { passed, failed, summary }
+todo.updated         { todos: [{ id, text, status }] }
+question.required    { interactionId, questions }
+permission.required  { interactionId, action, detail }
+git.diff.updated     { worktreeId, files: [{ path, additions, deletions }] }
+usage.updated        { runId, input, output, cacheRead, cacheWrite, cost }
+run.completed        { status, filesChanged, tests }
+attention.changed    { conversationId, attention: none|waiting|permission }
+notification.created { id, kind, conversationId, title }
+```
+
+Frontend aktualizuje cielené cache; žiadne plošné invalidácie pri každom evente.
+
+## 5. Fázy
+
+**Fáza 1 (toto kolo) — Pi-first core + paralelizmus + štruktúrované eventy.**
+Pi default, run lifecycle + recovery, konfigurovateľná konkurencia, worktree
+izolácia + diff/apply/discard, typed event pipeline, run summary (status, TODO,
+current action, elapsed, ETA, Stop), running/attention sidebar, model switch
+eventy, file references + viewer, conversation nav strip, usage limity/pacing,
+in-app notifikácie + browser notifications, AGENTS.md read/edit + Pi kontext.
+
+**Fáza 2 (ďalšie kolo) — otázky/permissiony cez Pi custom tools, SMTP async,
+provider-reported usage integrácie, codex/claude adaptéry (voliteľné), hlbšie
+ETA, debloat a odstránenie OpenCode z bežnej cesty.**
+
+## 6. Rozdelenie práce pre 4 agentov (vlastníctvo súborov)
+
+Pravidlá pre všetkých: nespúšťať `npm run build/deploy`, `wrangler`, ani
+`systemctl restart` (produkcia beží!). Žiadne nové závislosti bez potreby.
+Editovať len vlastné súbory. Držať sa existujúcich Whirl štýlov. Report na konci.
+
+### Agent A — Pi harness a runtime
+Súbory: `server/pi-runner.mjs`, `server/runtimes.mjs`, nové `server/pi/*.mjs`.
+- Spike SDK (defineTool, extension API, tool factories, SessionManager, events,
+  loadProjectContextFiles) a zapíš zistenia do `server/pi/CAPABILITIES.md`.
+- Pi je primárny: `PiRuntime` ako default, worker per Run, disposable.
+- Normalizuj Pi eventy na typed eventy z §4 a posielaj ich cez IPC controlu.
+- Definuj malý, koherentný štruktúrovaný tool layer (read/search/list/edit/write/
+  bash/git diff/tests/todo/ask_user/permission) cez Pi tool factories/defineTool.
+- Model/provider per Run cez `ModelRuntime`; reportuj usage (`getLastAssistantUsage`).
+- `ask_user` a `permission` request cez Pi mechanizmus, ak to SDK umožní; inak
+  priprav hook a zapíš obmedzenie.
+- NEEDITUJ `server/control.mjs`.
+
+### Agent B — Control plane, run lifecycle, worktrees, usage limity, AGENTS.md
+Súbory: `server/control.mjs`, `server/store.mjs`, nové `server/workspaces.mjs`,
+`server/usage-limits.mjs`, `server/notifications.mjs`.
+- Pi default engine; OpenCode len advanced.
+- Run lifecycle podľa §9 + heartbeat + reconciliation pri štarte (§16) + zákaz
+  duplicitných workerov; konfigurovateľný concurrency limit + fronta.
+- Git worktree izolácia pre mutujúce Runy (§12), `apply`/`discard`, konflikty
+  surfacovať; read-only bez worktree (§13).
+- Endpointy: project file read, AGENTS.md (global/project, nested detect,
+  read/write), usage limits + pacing, notifications.
+- Rozšír `events`, migration `user_version`.
+- NEEDITUJ `server/pi-runner.mjs`, `server/runtimes.mjs`, ani frontend.
+
+### Agent C — Chat/run UX
+Súbory: `src/components/whirl/chat-view.tsx`, `thread/*`,
+`src/components/whirl/run-summary.tsx` (nové), `conversation-nav.tsx` (nové),
+`file-viewer.tsx` (nové), `interaction-card.tsx`, `composer.tsx`,
+`model-menu.tsx`.
+- Run summary card: Working, x/y tasks, current action, elapsed, ETA, Stop (§28).
+- Renderovanie toolov podľa typu (file changed, command card, test card, git diff)
+  namiesto raw payloadov (§23).
+- Interaktívne otázky a permission UI (§24/25) napojené na existujúce
+  `/interactions/:id`.
+- File viewer: kód s highlightom a číslami riadkov, obrázky, download; rozlíšiť
+  read/changed/created/deleted (§21).
+- Conversation navigation strip pre user prompty (§20).
+- Model switch systémový event (§6).
+- Props a event kontrakt drž presne podľa §4/§6; socket/SSE napája Agent D v App.
+- NEEDITUJ `App.tsx`, `sidebar.tsx`, `pages/usage-view.tsx`.
+
+### Agent D — Shell, running/attention, usage, notifikácie
+Súbory: `src/App.tsx`, `src/components/whirl/sidebar.tsx`,
+`src/components/whirl/system-panel.tsx`, `pages/usage-view.tsx`,
+`pages/notifications-center.tsx` (nové), `search-palette.tsx`, `src/lib/*`.
+- Sidebar: sekcie/filter Running a Needs attention (§17), archive/unarchive/delete,
+  running-only filter, search (§18).
+- Top-left provider/model + kompaktný usage status (§30).
+- Usage view: limity, pacing, budgety, reported/estimated/manual (§30–32).
+- In-app attention centrum + browser notifications + preferencie (§33).
+- SSE typed eventy → cielené cache aktualizácie; minimalizovať rerenders (§34/35).
+- Napojiť komponenty Agentov C cez zamrznuté props.
+- NEEDITUJ `chat-view.tsx`, `thread/*`, `run-summary.tsx`, `conversation-nav.tsx`,
+  `file-viewer.tsx`, `interaction-card.tsx`, `composer.tsx`, `model-menu.tsx`.
+
+### Zamrznuté props (medzi C a D)
+- `RunSummary({ session, run, onStop, onInterrupt })` — renderuje sa v chat-view.
+- `ConversationNav({ messages, viewportRef, onJump })` — v chat-view.
+- `FileViewer({ open, file, onOpenChange, onToast })`, kde
+  `file = { path, status: 'read'|'changed'|'created'|'deleted', projectId }`.
+- `InteractionCard({ interaction, onDone, onError })` — existujúce, C rozšíri o
+  options/answers/permission.
+- SSE event typy presne podľa §4.
+- Sidebar dostane `running: Session[]`, `attention: Session[]`.
+
+## 7. Acceptance (testovať v tomto kole)
+
+Skrátený §46, čo musí prejsť end-to-end na VPS:
+
+1. Nový chat → otázka cez Pi → read/search tool → streamovaná odpoveď.
+2. Nadväzujúca coding požiadavka → mutujúci Run vo worktree → typed tool eventy →
+   TODO/current action → edit → shell/test → file preview → diff.
+3. Druhý chat paralelne → Running sidebar ukazuje oba.
+4. Zavrieť browser → Run pokračuje; po návrate sa stav zrekonštruuje.
+5. ESC interrupt → Run sa zastaví, nič sa nestratí; pokračovanie ďalšou správou.
+6. Reštart control → staleness reconciliation (žiadne „running" navždy).
+7. Otázka (question) a permission → UI odpovie → ten istý Run pokračuje.
+8. Apply/Merge alebo Discard zmien z worktree; konflikt sa zobrazí.
+9. Archive → restore → delete chat.
+10. Usage pacing a notifikácia pri dokončení/attention.
+
+Poradie integrácie: A (harness) + B (control) musia byť hotové pred C/D
+napojením; D vlastní App a napojí C komponenty. Orchestrátor po agentoch spraví
+typecheck, build, smoke/workflow testy a manuálny E2E, doplní chýbajúce a nasadí.
 
 ---
 
-## 3. Kontrakt adaptéra `src/lib/api.ts` (dodá orchestrátor)
+## 8. FÁZA 2 — dorobenie medzier zo zadania (aktuálne kolo)
 
-Pôvodné signatúry, v2 implementácia. Všetky cesty cez `api()` s prefixom `/api/v2`.
+Fáza 1 je hotová a nasadená: Pi-first control plane, run lifecycle
+(`queued|starting|running|waiting_for_user|waiting_for_permission|interrupting|
+interrupted|completed|failed|cancelled|interrupted_by_restart`), typed SSE
+eventy, worktree endpointy + apply/discard, usage limity/pacing, notifikácie,
+RunSummary, file viewer, conversation nav, running/attention sidebar, model
+switch eventy, AGENTS.md endpointy. Overené: oba engine-y (smoke), Pi default
+E2E, paused→send auto-resume.
 
-| Funkcia | v2 podklad |
-|---|---|
-| `getOverview()` | `/bootstrap` + `/system` (+ projekty → directories, bežiace → agents) |
-| `getSession(id, limit)` | `GET /conversations/:id` |
-| `getSessionUpdates(id, since)` | `GET /conversations/:id`, porovnanie `updated` (fallback; primárne SSE) |
-| `getOlderMessages(id, before)` | `GET /conversations/:id?before=` |
-| `getHistory(params)` | `GET /conversations?q&cursor` + mapovanie na `total` |
-| `getClips()` | `GET /clips?projectId=all` → legacy `Clip` tvar |
-| `getModels()` | `GET /models` → `{models: ModelOption[]}` |
-| `getSystem()` | `GET /system` |
-| `getSystemHistory()` | `GET /system/history` |
-| `getProcesses()` | `GET /processes` |
-| `killProcess(pid, signal)` | `POST /processes/:pid/kill` |
-| `regenerateSessionTitle(id)` | `POST /conversations/:id/title` → `{title}` |
-| `setSessionMeta(id, patch)` | `GET` + `PATCH /conversations/:id` (s revision) |
-| `setSessionModel(id, model)` | `PATCH /conversations/:id` |
-| `postJson(url, body)` | nezmenené (volajúci používajú v2 cesty) |
-| `getAgentOutput(agent)` | odstránené / nevolané |
+### Čo v Fáze 2 doplniť (presne podľa §)
 
----
+| § | Chýba | Workstream |
+|---|---|---|
+| §12, §46 | Apply / Discard / View changes **UI** (endpointy `/runs/:id/{changes,apply,discard}` a `/worktrees` existujú) | Agent E |
+| §29 | AGENTS.md **UI** (view/edit global+project, nested scope) — endpointy `/agents-md` existujú | Agent E |
+| §15 | **ESC** interrupt aktívneho Runu (rešpektovať modály/paletu/file viewer) | Agent E |
+| §11 | **paralelnosť**: default MAX_RUNS aspoň 2 + nastavenie v UI + zobrazenie fronty | Agent F |
+| §19 | **live `text.delta`** (teraz len snapshoty `message.updated`) | Agent H |
+| §33 | **SMTP async** (neblokujúce, disabled default, preferencie) | Agent F |
+| §40 | **špecifické chyby** (rate limit, auth, context limit, worker crash, git conflict…), nie „Something went wrong" | Agent F |
+| §29 | AGENTS.md doručenie Pi do kontextu cez `loadProjectContextFiles` (nie prepend promptu) | Agent H |
+| §23 | štruktúrované tool party musia prežiť do UI (dnes `safePart` stripuje do artifactu → fallback karty) | Agent H |
+| §27/§28 | `currentAction`, `eta`, `todos` v `activeRun` | Agent H (dáta) + E (render) |
+| §46 | **acceptance testy**: worktree apply/discard, restart recovery, question/permission round-trip, parallel runs, notifications, pacing | Agent G |
 
-## 4. Backend endpointy (Agent A, iba `server/control.mjs`)
+### Fáza 2 agenti (vlastníctvo)
 
-Prevziať implementácie zo starého `server.js` (v opencode DB / z kontextu):
+- **Agent E (frontend gaps)** — `src/components/whirl/run-summary.tsx`,
+  nové `changes-panel.tsx`, `agents-md-dialog.tsx`, `src/components/whirl/chat-view.tsx`
+  (ESC), `src/components/whirl/session-menu.tsx` (entry pre AGENTS.md/settings),
+  `src/App.tsx` (napojenie, concurrency nastavenie). Vizuál Whirl, žiadny nový dizajn.
+- **Agent F (control plane)** — `server/control.mjs`, `server/usage-limits.mjs`,
+  nový `server/smtp.mjs`. Default `maxRuns=2` + `settings.maxRuns`, SMTP async,
+  §40 chyby. NEEDITUJ `runtimes.mjs`/`pi-runner.mjs` ani frontend.
+- **Agent G (testy/acceptance)** — `scripts/workbench.*.mjs`, nový
+  `scripts/workbench.acceptance.mjs`. Len testy + report; bugy v serveri hlásiť.
+- **Agent H (Pi harness polish)** — `server/runtimes.mjs`, `server/pi-runner.mjs`,
+  `server/pi/**`. text.delta, AGENTS.md do kontextu, štruktúrované party,
+  currentAction/eta/todos, deleted-file detekcia, question/permission hardening.
+  NEEDITUJ `control.mjs` (Agent F) — kontrakt hookov ostáva z Fázy 1.
 
-1. `GET /system` → `{ load[], cpuCount, memoryTotal, memoryFree, memoryUsed,
-   memoryPercent, swap{total,free,used}, uptime, cpu{percent,cores},
-   disk{total,free,used,percent}, sampledAt }`
-2. `GET /system/history` → `{ samples:[{t,cpu,memoryPercent,memoryUsed}], intervalMs:15000 }`
-   (ring buffer 240 vzoriek, sampler každých 15 s; CPU % len zo sampleru)
-3. `GET /processes` → `{ processes:[{pid,cpu,memory,etimes,user,name,args}] }`
-   (ps, max 25, --sort=-pcpu)
-4. `POST /processes/:pid/kill {signal}` → rovnaké obmedzenia ako pôvodne:
-   iba rovnaký UID, odmietnuť `process.pid`/`process.ppid`, signály
-   SIGTERM/SIGKILL/SIGINT.
-5. `POST /assistant` → SSE streaming read-only asistent pre Ask panel:
-   - body `{ conversationId, messages:[{role,content}] }`
-   - odpoveď `text/event-stream`, riadky `data: {"delta":"..."}\n\n`,
-     na konci `data: {"done":true}\n\n`, chyby `data: {"error":"..."}\n\n`
-   - kontext: text posledných ~60 správ konverzácie (max 8000 znakov)
-   - model: `opencode-go/deepseek-v4-flash` cez `https://opencode.ai/zen/go/v1`
-     (kľúč z `~/.local/share/opencode/auth.json`), `max_tokens: 1200`
-   - bez kľúča → 503 s jasnou chybou (panel zobrazí chybu)
-
-Do `check`/testov doplniť aspoň smoke volania `/system` a `/processes`.
-
----
-
-## 5. Rozdelenie práce medzi agentov
-
-### Agent A — backend compat (`server/control.mjs` ONLY)
-- Implementovať body 1–5 z kapitoly 4.
-- Pridať do existujúceho `prune` intervalu nič nemeniť; sampler ako `setInterval(...).unref()`.
-- Nesmie meniť existujúce v2 routes, schému DB, ani iné súbory.
-- Verifikácia: `node --check server/control.mjs`, `curl` na nové endpointy
-  cez `http://127.0.0.1:8788` s `x-workbench-internal-key` z
-  `~/.config/secrets/workbench-cloudflare-secrets.json`.
-- **Nerestartovať služby** (orchestrátor to spraví po integrácii).
-
-### Agent B — shell (`src/App.tsx` + sidebar + prehľady)
-Súbory: `src/App.tsx` (nový, z `/tmp/opencode/recovered/src/App.tsx`),
-`src/components/whirl/sidebar.tsx`, `system-panel.tsx`, `search-palette.tsx`,
-`session-menu.tsx`, `rename-dialog.tsx`, `dialogs.tsx`.
-
-- Vychádzať z recovered verzií; **layout a JSX zachovať** (sidebar s brandom,
-  LIVE sekcia, projekty/directories, recent, footer s témou/logout; dialogs
-  bez OutputDialog — live output sa neobnovuje; NewTaskDialog nahradiť
-  v2 tokom alebo ponechať nepoužitý).
-- Data layer prepísať na adaptér z kapitoly 3 + SSE (`/api/v2/events`) cez
-  `EventSource` s cielenými invalidáciami (nie plošný refetch).
-- Sidebar props prispôsobiť v2 svetu (Overview z adaptéra), zachovať vzhľad.
-- Performance panel `SystemPanel` napojiť na `getSystem`, `getSystemHistory`,
-  `getProcesses`, `killProcess`; "live tasks" = bežiace konverzácie.
-- `#live/` pane routing odstrániť.
-- Verifikácia: `npx tsc --noEmit` (ignorovať chyby v cudzích súboroch).
-
-### Agent C — chat a home
-Súbory: `src/components/whirl/chat-view.tsx`, `model-menu.tsx`,
-`pages/home-view.tsx`, `composer.tsx`, `assistant-panel.tsx`.
-
-- `chat-view.tsx`: recovered verzia; odstrániť live-output/terminal prvky a
-  "Ready to continue"; queue čítať zo `session.queued` (server), zobraziť
-  `InteractionCard` pre `session.interactions`; stop/resume cez
-  `POST /conversations/:id/stop|resume`; starý `queued` prop nahradiť.
-- `model-menu.tsx`: v2 `/models` + `PATCH /conversations/:id` (meniť model
-  počas behu = "Applies next turn" náznak, žiadny fake stav).
-- `home-view.tsx`: pôvodné chips (priečinky z `directories`) + kind
-  opencode/pi; štart úlohy = `POST /conversations` + `POST /conversations/:id/commands`
-  (žiadne `/api/tasks`); podpora projektov z bootstrapu.
-- `composer.tsx`: vrátiť recovered verziu (273 riadkov); doplniť queue-friendly
-  placeholder (follow-up čaká vo fronte).
-- `assistant-panel.tsx`: prepísať z `@ai-sdk/react` na jednoduchý fetch
-  streaming proti `POST /api/v2/assistant` (protokol z kapitoly 4).
-- Verifikácia: `npx tsc --noEmit`.
-
-### Agent D — stránky, čistenie, integrácia
-Súbory: `src/components/whirl/pages/history-view.tsx`, `clips-view.tsx`,
-`pages/usage-view.tsx` (len napojenie), `thread/*` (kontrola kompatibility),
-+ mazanie nových UI súborov.
-
-- `history-view.tsx`, `clips-view.tsx`: recovered verzie napojené na adaptér.
-- `usage-view.tsx`: zostáva nový; iba skontrolovať, že funguje s adaptérom
-  a `model-picker.tsx` (tie nemeniť).
-- Zmazať: `src/workbench-app.tsx`, `src/components/whirl/editor.tsx`,
-  `thread/run-card.tsx`, `project-files-dialog.tsx`, `pages/context-library.tsx`.
-- Skontrolovať, že thread komponenty sedia s legacy chat-view (props).
-- Verifikácia: `npx tsc --noEmit`.
-
----
-
-## 6. Pravidlá pre agentov
-
-1. **Nespúšťať** `npm run build`, `npm run deploy`, `wrangler`, ani
-   `systemctl restart` — build/promote robí orchestrátor po integrácii.
-2. **Nemeniť** súbory mimo vlastného zoznamu (hlavne nie `server/*`,
-   `lib/api.ts`, `lib/types.ts`, `lib/format.ts` — tie dodá orchestrátor).
-3. Držať sa existujúcich Whirl štýlov a tried (`bg-well`, `raised`, `wb-scroll`,
-   `text-muted-foreground`, …). Žiadny nový dizajn.
-4. Žiadne secrets, žiadne osobné cesty v kóde.
-5. Report na konci: zoznam zmenných súborov, čo funguje, čo je nedokončené.
-
-## 7. Finálna verifikácia (orchestrátor)
-
-- `npx tsc --noEmit`, `npm run check`, `npm test`.
-- `npm run build` + promote; kontrola `public/index.html`.
-- `curl` smoke: `/system`, `/processes`, `/assistant`, `bootstrap`, event stream.
-- Manuálny E2E cez gateway: nová konverzácia → beh → changes artifact →
-  stop/resume → usage.
-- Ak treba, doplniť chýbajúce veci a až potom prípadný commit/push.
-
----
-
-## 8. Stav implementácie (dokončené)
-
-- **Backend:** `server/control.mjs` má `/system`, `/system/history`, `/processes`,
-  `/processes/:pid/kill` (obmedzenia ako pôvodne) a `/assistant` (SSE streaming
-  read-only asistent cez OpenCode Go). Overené curlom.
-- **UI:** obnovené pôvodné Whirl UI zo 5. 10. — `App.tsx`, `sidebar`,
-  `chat-view`, `home-view`, `model-menu`, `composer`, `assistant-panel`
-  (prepísaný z AI SDK na vlastný streaming), `system-panel` (performance panel),
-  `search-palette`, `session-menu`, `rename-dialog`, `history-view`, `clips-view`.
-  `usage-view` zostal nový (používateľ ho chce).
-- **Odstránené:** live output, `OutputDialog`, "Ready to continue", moje nové
-  UI súbory (`workbench-app`, `editor`, `run-card`, `project-files-dialog`,
-  `context-library`).
-- **Napojenie:** `src/lib/api.ts` je adaptér pôvodných signatúr na `/api/v2`,
-  `App.tsx` používa SSE (`/api/v2/events`) s cielenými invalidáciami,
-  serverovú frontu (`session.quoted`/`queued` → remove), stop/resume, model
-  a meta cez v2.
-- **Overené:** `npm run check`, `npm test` 7/7, `workbench.smoke.mjs` (oba
-  engine-y), `workbench.workflow-test.mjs` (attachment, zmena modelu, pauznutá
-  fronta, SSE). Build promovaný, assety 200 cez gateway.
+Kontrakty z Fázy 1 (§4 eventy, hooky, zamrznuté props) ostávajú platné.

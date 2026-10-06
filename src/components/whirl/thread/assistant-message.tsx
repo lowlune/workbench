@@ -3,39 +3,46 @@ import { IconCheck, IconCopy } from '@tabler/icons-react';
 import { Markdown } from '@/components/whirl/markdown';
 import { MessageActionButton } from '@/components/whirl/message-action-button';
 import { ToolActivity } from '@/components/whirl/thread/activity';
-import { formatTokens, messageContext, messageText } from '@/lib/format';
+import { SystemMessage, normalText, systemTexts } from '@/components/whirl/thread/system-message';
+import { isToolPart } from '@/components/whirl/thread/tool-data';
+import { formatTokens, messageContext } from '@/lib/format';
+import type { FileRef } from '@/components/whirl/file-viewer';
 import type { Message } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 /* One assistant turn: prose first, tool runs beneath it, then the quiet
-   action row (copy + usage stats) that fades in on hover. */
+   action row (copy + usage stats) that fades in on hover. System notices
+   (model switches) sit centered between turns. */
 export const AssistantMessage = memo(function AssistantMessage({
   message,
   isWorking,
+  onOpenFile,
 }: {
   message: Message;
   isWorking: boolean;
+  onOpenFile?: (file: FileRef) => void;
 }) {
-  const text = messageText(message);
-  const tools = message.parts.filter((part) => part.type === 'tool');
+  const text = normalText(message);
+  const notices = systemTexts(message);
+  const tools = message.parts.filter(isToolPart);
   const context = messageContext(message);
   const model = message.info.modelName || message.info.modelID;
   const hasStats = Boolean(model || context.used || context.output);
 
+  if (!text && !tools.length && !notices.length) return null;
+
   return (
     <div className="group/msg flex w-full min-w-0 flex-col items-start">
+      {notices.map((notice, index) => <SystemMessage key={index} text={notice} />)}
       {text.length > 0 && <Markdown>{text}</Markdown>}
       {tools.length > 0 && (
         <div className={cn('w-full min-w-0', text.length > 0 && 'mt-1.5')}>
-          <ToolActivity tools={tools} running={isWorking} />
+          <ToolActivity tools={tools} running={isWorking} onOpenFile={onOpenFile} />
         </div>
       )}
-      {!text && !tools.length && !isWorking && (
-        <p className="text-[13px]/5 text-muted-foreground">No content was recorded for this message.</p>
-      )}
-      {!isWorking && (text.length > 0 || hasStats) && (
+      {!isWorking && text.length > 0 && (
         <div className="mt-1.5 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-within:opacity-100 coarse:opacity-100">
-          {text.length > 0 && <CopyAction text={text} />}
+          <CopyAction text={text} />
           {hasStats && (
             <span className="flex items-center gap-1.5 pl-1.5 text-[11px] text-muted-foreground">
               {model && <span className="max-w-44 truncate">{model}</span>}

@@ -15,6 +15,7 @@ export function ModelMenu({
   tags,
   liveAgent,
   onSelect,
+  compact = false,
 }: {
   model?: string;
   context: { used: number; limit: number; percent: number };
@@ -22,6 +23,7 @@ export function ModelMenu({
   tags?: string[];
   liveAgent: boolean;
   onSelect: (model: string) => void;
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -55,15 +57,20 @@ export function ModelMenu({
           <button
             type="button"
             aria-label="Change model"
-            className="raised inline-flex h-8 max-w-60 cursor-pointer items-center gap-1.5 rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border transition-colors duration-150 hover:bg-accent"
+            className={cn(
+              'inline-flex cursor-pointer items-center gap-1.5 rounded-full transition-colors duration-150 hover:bg-accent',
+              compact
+                ? 'h-7 max-w-52 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground'
+                : 'raised h-8 max-w-60 bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border',
+            )}
           >
             <IconCpu size={14} className="shrink-0 text-muted-foreground" />
             <span className="truncate">{displayName || 'Choose model'}</span>
-            {context.percent > 0 && <span className="shrink-0 tabular-nums text-muted-foreground">{context.percent}%</span>}
+            {context.percent > 0 && !compact && <span className="shrink-0 tabular-nums text-muted-foreground">{context.percent}%</span>}
           </button>
         }
       />
-      <PopoverContent side="bottom" align="end" className="w-80 p-0">
+      <PopoverContent side={compact ? 'top' : 'bottom'} align="end" className="w-80 p-0">
         <div className="border-b border-border px-3 py-2.5">
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
             <span className="truncate">{shortDirectory(directory)}</span>

@@ -22,7 +22,7 @@ test('recovery marks active work interrupted and pauses the durable queue',t=>{
   f.store.accept(c.id,{text:'one',attachments:[]},'p/m',null,id);f.store.status(id,'running');
   f.store.accept(c.id,{text:'two',attachments:[]},'p/m',null,uid());
   const s=f.reopen();s.recover();const view=s.view(s.conversation(c.id));assert.equal(view.paused,true);assert.equal(view.queued.length,1);
-  assert.equal(s.db.prepare('SELECT status FROM commands WHERE id=?').get(id).status,'interrupted');
+  assert.equal(s.db.prepare('SELECT status FROM commands WHERE id=?').get(id).status,'interrupted_by_restart');
 });
 test('queued follow-ups do not mask the current active run',t=>{
   const {store}=fixture(t);const c=store.createConversation({directory:'/tmp'});const first=uid();

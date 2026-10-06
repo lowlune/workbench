@@ -4,10 +4,28 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { ToolActivity } from '@/components/whirl/thread/activity';
 import { AssistantMessage } from '@/components/whirl/thread/assistant-message';
 import { UserMessage } from '@/components/whirl/thread/user-message';
+import { normalText, systemTexts } from '@/components/whirl/thread/system-message';
+import { isToolPart } from '@/components/whirl/thread/tool-data';
 import { isActivity } from '@/lib/format';
+import type { FileRef } from '@/components/whirl/file-viewer';
 import type { Message } from '@/lib/types';
 
+function isEmptyAssistant(message: Message) {
+  return message.info.role === 'assistant'
+    && !message.parts.some((part) => (part.type === 'text' && String(part.text || '').trim())
+      || ['tool', 'file', 'reasoning', 'step-start', 'step-finish'].includes(part.type));
+}
+
 type Row = { kind: 'message'; message: Message } | { kind: 'activity'; messages: Message[]; key: string };
+
+/* A message that is purely tool work (legacy parts or the new typed ones). */
+function isActivityMessage(message: Message) {
+  if (isActivity(message)) return true;
+  return message.info.role === 'assistant'
+    && normalText(message).trim() === ''
+    && systemTexts(message).length === 0
+    && message.parts.some(isToolPart);
+}
 
 /* The transcript: scrolls at the live edge while the agent writes and stays
    wherever the reader left it otherwise. Opens with real bottom padding so
@@ -18,6 +36,8 @@ export function ThreadView({
   hasMore = false,
   onLoadOlder,
   viewportRef: externalViewportRef,
+  onOpenFile,
+  hiddenCommandIds,
 }: {
   /** `undefined` while the thread loads — draws the spinner. */
   messages: Message[] | undefined;
@@ -27,6 +47,10 @@ export function ThreadView({
   /** Lets the parent own the scroller (scroll preservation when older
    *  messages are prepended). */
   viewportRef?: RefObject<HTMLDivElement | null>;
+  onOpenFile?: (file: FileRef) => void;
+  /** Command ids that are still queued; their user message is hidden from the
+   *  transcript until the run actually starts. */
+  hiddenCommandIds?: Set<string>;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);
   const viewportRef = externalViewportRef ?? internalRef;
@@ -36,28 +60,36 @@ export function ThreadView({
 
   const rows = useMemo(() => {
     const output: Row[] = [];
-    const list = messages || [];
+    const list = (messages || []).filter((message) => !isEmptyAssistant(message) && !(message.commandId && hiddenCommandIds?.has(message.commandId)));
     for (let index = 0; index < list.length;) {
       const message = list[index];
-      if (!isActivity(message)) {
+      if (!isActivityMessage(message)) {
         output.push({ kind: 'message', message });
         index += 1;
         continue;
       }
       const group: Message[] = [];
-      while (index < list.length && isActivity(list[index])) group.push(list[index++]);
+      while (index < list.length && isActivityMessage(list[index])) group.push(list[index++]);
       output.push({ kind: 'activity', messages: group, key: group[0].id });
     }
     return output;
-  }, [messages]);
+  }, [messages, hiddenCommandIds]);
+
+  const toolPartsOf = (group: Message[]) => group.flatMap((message) => message.parts.filter(isToolPart));
 
   const virtual = useVirtualizer({ count: rows.length, getScrollElement: () => viewportRef.current,
     estimateSize: () => 180, overscan: 8, enabled: rows.length > 80,
     getItemKey: index => rows[index].kind === 'message' ? rows[index].message.id : rows[index].key });
   function renderRow(row: Row) {
-    return row.kind === 'message' ? row.message.info.role === 'user'
-      ? <UserMessage message={row.message} /> : <AssistantMessage message={row.message} isWorking={isWorking && row === rows.at(-1)} />
-      : <ToolActivity tools={row.messages.flatMap(message => message.parts.filter(part => part.type === 'tool'))} running={isWorking && row === rows.at(-1)} />;
+    return row.kind === 'message'
+      ? (
+        <div data-message-id={row.message.id}>
+          {row.message.info.role === 'user'
+            ? <UserMessage message={row.message} />
+            : <AssistantMessage message={row.message} isWorking={isWorking && row === rows.at(-1)} onOpenFile={onOpenFile} />}
+        </div>
+      )
+      : <ToolActivity tools={toolPartsOf(row.messages)} running={isWorking && row === rows.at(-1)} onOpenFile={onOpenFile} />;
   }
 
   useEffect(() => {
@@ -99,7 +131,7 @@ export function ThreadView({
           if (element.scrollTop <= 56 && hasMore && onLoadOlder) onLoadOlder();
         }}
       >
-        <div className="mx-auto w-full max-w-3xl px-3 pt-5 pb-6 md:px-6">
+        <div className="mx-auto w-full max-w-[52rem] px-3 pt-5 pb-[var(--dock-clearance,7rem)] md:px-6">
           {messages === undefined ? (
             <div className="flex h-[40vh] items-center justify-center">
               <IconLoader2 size={20} className="animate-spin text-muted-foreground" />
@@ -111,24 +143,25 @@ export function ThreadView({
             </div>
           ) : rows.length > 80 ? (
             <div style={{ height: virtual.getTotalSize(), position: 'relative', width: '100%' }}>
-              {virtual.getVirtualItems().map(item => <div key={item.key} data-index={item.index} ref={virtual.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} className="pb-7">{renderRow(rows[item.index])}</div>)}
+              {virtual.getVirtualItems().map((item) => {
+                const row = rows[item.index];
+                return (
+                  <div
+                    key={item.key}
+                    data-index={item.index}
+                    data-message-id={row.kind === 'message' ? row.message.id : undefined}
+                    ref={virtual.measureElement}
+                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
+                    className="pb-7"
+                  >
+                    {renderRow(row)}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="flex flex-col gap-7">
-              {rows.map((row) => row.kind === 'message'
-                ? (
-                  row.message.info.role === 'user'
-                    ? <UserMessage key={row.message.id} message={row.message} />
-                    : <AssistantMessage key={row.message.id} message={row.message} isWorking={isWorking && row === rows.at(-1)} />
-                )
-                : (
-                  <div key={row.key} className="w-full min-w-0">
-                    <ToolActivity
-                      tools={row.messages.flatMap((message) => message.parts.filter((part) => part.type === 'tool'))}
-                      running={isWorking && row === rows.at(-1)}
-                    />
-                  </div>
-                ))}
+              {rows.map((row) => <div key={row.kind === 'message' ? row.message.id : row.key}>{renderRow(row)}</div>)}
             </div>
           )}
         </div>

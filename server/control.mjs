@@ -2,14 +2,18 @@ import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, statfsSync } from 'node:fs';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store, uid, decode, fail, canonical } from './store.mjs';
+import { Store, uid, decode, fail, canonical, normalizeStatus, RUN_CAPACITY, RUN_LIVE, RUN_TERMINAL } from './store.mjs';
 import { OpenCodeRuntime, PiRuntime, CAPABILITIES } from './runtimes.mjs';
 import { generateTitle } from './titles.mjs';
+import { createWorktree, worktreeChanges, applyWorktree, discardWorktree, isGitRepo, worktreeRoot } from './workspaces.mjs';
+import { pacing, listLimits, upsertLimit, removeLimit } from './usage-limits.mjs';
+import { createNotification, listNotifications, markNotificationRead, markAllNotificationsRead } from './notifications.mjs';
+import { createSmtpMailer, publicSmtpConfig, saveSmtpConfig } from './smtp.mjs';
 
 const execFileAsync = (command, args, options) => new Promise((resolve) => {
   execFile(command, args, { timeout: 5000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => resolve({ error, stdout: stdout || '', stderr: stderr || '' }));
@@ -60,7 +64,8 @@ const CONTROL = path.join(DATA, 'control');
 const BLOBS = path.join(CONTROL, 'blobs');
 const GENERAL = path.join(CONTROL, 'general');
 for (const dir of [CONTROL, BLOBS, GENERAL]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-const secrets = decode(readFileSync(path.join(HOME, '.config/secrets/workbench-cloudflare-secrets.json'), 'utf8'), {});
+let secrets = {};
+try { secrets = decode(readFileSync(path.join(HOME, '.config/secrets/workbench-cloudflare-secrets.json'), 'utf8'), {}); } catch {}
 const key = process.env.WORKBENCH_PROXY_KEY || secrets.WORKBENCH_PROXY_KEY;
 if (!key) throw new Error('WORKBENCH_PROXY_KEY is required.');
 const store = new Store(CONTROL);
@@ -72,8 +77,20 @@ try {
   legacy.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=1000;');
 } catch {}
 
-const MAX_RUNS = Math.max(1, Math.min(8, Number(process.env.WORKBENCH_MAX_RUNS || 1)));
+const MIN_RUNS = 1;
+const MAX_RUNS_LIMIT = 8;
+const DEFAULT_MAX_RUNS = Math.max(MIN_RUNS, Math.min(MAX_RUNS_LIMIT, Math.floor(Number(process.env.WORKBENCH_MAX_RUNS || 2)) || 2));
 const MIN_FREE_MB = Math.max(64, Number(process.env.WORKBENCH_MIN_FREE_MB || 256));
+
+/* Concurrency limit is resolved at scheduling time (§11): a persisted
+   `settings.maxRuns` wins, the environment variable provides the process
+   default (2, not 1), and the result is always clamped to 1..8. Reading it per
+   tick lets a settings change take effect without a restart. */
+function maxRuns() {
+  const stored = Number(store.getSetting('maxRuns'));
+  if (Number.isInteger(stored) && stored >= MIN_RUNS && stored <= MAX_RUNS_LIMIT) return stored;
+  return DEFAULT_MAX_RUNS;
+}
 
 let scheduling = false;
 let shuttingDown = false;
@@ -82,6 +99,224 @@ let lastCatalog = 0;
 let catalog = store.getSetting('catalog', []);
 let catalogError = null;
 const runs = new Map();
+
+/* SMTP delivery (§33) is best-effort and completely off the run path. The
+   mailer observes `notification.created` events and silently no-ops unless an
+   `smtp.host` is configured. Errors only downgrade `notifications.delivery`. */
+const mailer = createSmtpMailer(store);
+mailer.start();
+store.listeners.add((event) => { try { if (event?.type === 'notification.created') mailer.enqueue(event); } catch {} });
+
+const WORKTREES = worktreeRoot();
+const GLOBAL_AGENTS = path.join(HOME, '.config/workbench/AGENTS.md');
+
+/* ---- Run lifecycle helpers (PLAN §4/§9/§16) ---- */
+
+/* Specific, user-readable failure codes (§40). Codes are inferred only from
+   the runtime's own error text — we never invent a provider diagnosis — and are
+   persisted on the command so a reload shows the same reason. */
+const FAILURE_MESSAGES = {
+  model_unavailable: 'The selected model is not available for this provider. Pick another model and retry.',
+  provider_unavailable: 'The model provider is temporarily unavailable. Retry in a moment or switch models.',
+  provider_rate_limit: 'The provider rate limit or quota was reached. Wait a little, then retry or switch models.',
+  provider_auth: 'The provider rejected the credentials (401/403). Reconnect the API key and retry.',
+  context_limit: 'The request exceeded the model context window. Start a new chat, reduce the input, or switch to a larger-context model.',
+  worker_crashed: 'The worker process running this task exited unexpectedly. Retry to start a fresh worker.',
+  pi_failure: 'The Pi agent harness reported a failure. Retry, and check the model connection if it repeats.',
+  command_failed: 'A shell command run by the agent failed. Review the command output, then retry.',
+  git_conflict: 'Git could not apply the changes because of a conflict. Resolve the conflicting files and retry.',
+  permission_denied: 'The agent was denied access to a file or resource.',
+  attachment_failed: 'An attachment could not be read or sent.',
+  network_error: 'A network request failed. Check connectivity and retry.',
+  restart_interrupted: 'The control plane restarted while this task was running. The recorded work is preserved; review it before continuing.',
+};
+
+function classifyFailure(message) {
+  const text = String(message || '').toLowerCase();
+  if (!text) return null;
+  const has = (...needles) => needles.some((needle) => text.includes(needle));
+  if (has('401', '403', 'unauthorized', 'invalid api key', 'invalid_api_key', 'not authenticated', 'authentication', 'api key is invalid', 'permission denied by provider')) return 'provider_auth';
+  if (has('rate limit', 'rate_limit', 'ratelimit', 'too many requests', '429', 'quota exceeded', 'quota reached', 'resource_exhausted')) return 'provider_rate_limit';
+  if (has('context length', 'context_length', 'context window', 'maximum context', 'too many tokens', 'token limit', 'max_tokens', 'prompt is too long', 'exceeds the maximum')) return 'context_limit';
+  if (has('model not found', 'model_not_found', 'no such model', 'unknown model', 'model does not exist', 'does not exist', 'is not available', 'not available for', 'unsupported model', 'does not support')) return 'model_unavailable';
+  if (has('merge conflict', 'git conflict', 'conflict', 'could not apply', 'patch does not apply', 'does not apply cleanly')) return 'git_conflict';
+  if (has('eacces', 'eperm', 'permission denied', 'operation not permitted', 'not permitted')) return 'permission_denied';
+  if (has('attachment', 'attach file', 'upload failed')) return 'attachment_failed';
+  if (has('econnrefused', 'econnreset', 'enotfound', 'etimedout', 'eai_again', 'fetch failed', 'socket hang up', 'network error', 'connection refused', 'dns lookup', 'timed out', 'timeout')) return 'network_error';
+  if (has('runner exited', 'runtime exited', 'could not start', 'child process', 'process exited', 'was killed', 'sigkill', 'sigterm', 'crashed', 'segmentation')) return 'worker_crashed';
+  if (has('502', '503', '504', 'bad gateway', 'service unavailable', 'gateway timeout', 'overloaded', 'provider is down')) return 'provider_unavailable';
+  if (has('pi runner', 'pi agent', 'pi model', 'pi failure', 'pi harness', 'pi failed')) return 'pi_failure';
+  if (has('exit code', 'non-zero', 'command failed', 'command exited', 'shell command')) return 'command_failed';
+  if (has('interrupted_by_restart', 'control plane restarted', 'control plane stopped')) return 'restart_interrupted';
+  return null;
+}
+
+function describeFailure(error) {
+  const raw = String(error?.message || error || 'The task failed.').trim() || 'The task failed.';
+  if (error?.cancelled) return { code: null, message: raw };
+  const code = classifyFailure(raw);
+  return { code, message: code ? FAILURE_MESSAGES[code] : raw };
+}
+
+function emitTyped(conversationId, runId, type, payload = {}) {
+  return store.event(type, conversationId, { ...payload, runId }, { kind: type, runId });
+}
+
+function setRunPhase(run, status, extra = {}) {
+  status = normalizeStatus(status);
+  const changed = run.phase !== status;
+  run.previousPhase = run.phase;
+  run.phase = status;
+  run.heartbeat = Date.now();
+  if (run.command?.id) store.heartbeat(run.command.id);
+  if (changed) store.status(run.command.id, status, extra.error ?? null, extra.failureCode ?? null);
+  if (changed || extra.force) {
+    emitTyped(run.conversation.id, run.command.id, 'run.state', {
+      status,
+      previous: run.previousPhase || null,
+      model: run.command.model,
+      provider: modelInfo(run.command.model, run.conversation.engine)?.provider || null,
+      started: run.started || null,
+      ended: RUN_TERMINAL.includes(status) ? Date.now() : null,
+      error: extra.error ?? null,
+      failureCode: extra.failureCode ?? null,
+    });
+  }
+}
+
+function runCapacityCount() {
+  let count = 0;
+  for (const run of runs.values()) if (RUN_CAPACITY.includes(run.phase)) count += 1;
+  return count;
+}
+
+function workspaceLeased(directory, exceptConversation = null) {
+  for (const run of runs.values()) {
+    if (run.conversation.id === exceptConversation) continue;
+    if (run.conversation.directory === directory) return true;
+    if (run.worktree?.path && run.worktree.path === directory) return true;
+  }
+  return false;
+}
+
+function registerInteraction(run, id, kind, data) {
+  const previous = store.db.prepare('SELECT status FROM interactions WHERE id=?').get(id);
+  if (previous) return;
+  const runId = run.command.id;
+  const questions = data?.questions || data?.options || null;
+  store.db.prepare('INSERT INTO interactions(id,conversation_id,kind,data,run_id,options) VALUES (?,?,?,?,?,?)')
+    .run(id, run.conversation.id, kind, JSON.stringify(data || {}), runId, questions ? JSON.stringify(questions) : null);
+  run.waiting = true;
+  setRunPhase(run, kind === 'permission' ? 'waiting_for_permission' : 'waiting_for_user');
+  if (kind === 'permission') {
+    const action = data?.action || data?.permission || null;
+    const detail = data?.detail || (Array.isArray(data?.patterns) ? data.patterns[0] : null);
+    emitTyped(run.conversation.id, runId, 'permission.required', { interactionId: id, action, detail });
+    createNotification(store, { kind: 'permission.required', conversationId: run.conversation.id, runId, title: `Permission needed in “${run.conversation.title}”`, body: action || detail || null, severity: 'attention', attention: true });
+  } else {
+    emitTyped(run.conversation.id, runId, 'question.required', { interactionId: id, questions: questions || [] });
+    createNotification(store, { kind: 'question.required', conversationId: run.conversation.id, runId, title: `A question is waiting in “${run.conversation.title}”`, severity: 'attention', attention: true });
+  }
+  store.event('interaction.created', run.conversation.id);
+  void tick();
+}
+
+function closeInteraction(run, id) {
+  store.db.prepare("UPDATE interactions SET status='answered' WHERE id=?").run(id);
+  run.waiting = false;
+  if (!run.cancelled && RUN_LIVE.includes(run.phase)) setRunPhase(run, 'running');
+  void tick();
+}
+
+/* Build the hook surface handed to the runtime. Agent A may call any subset;
+   unknown hooks are simply unused, and every call is defensive so a runtime
+   that does not implement a hook cannot break the control plane. */
+function runtimeHooks(run, command, conversation) {
+  const runId = command.id;
+  const conversationId = conversation.id;
+  return {
+    binding: (nativeId) => store.db.prepare('UPDATE conversations SET native_id=? WHERE id=?').run(nativeId, conversationId),
+    nativeMessage: (id) => store.db.prepare('UPDATE commands SET native_message=? WHERE id=?').run(id, command.id),
+    running: () => {
+      if (run.cancelled) throw new Error('Run cancelled before dispatch.');
+      setRunPhase(run, 'running');
+    },
+    message: (message) => persistMessage(conversationId, command.id, message),
+    interaction: (id, kind, data) => registerInteraction(run, id, kind, data),
+    interactionClosed: (id) => closeInteraction(run, id),
+    state: (payload) => {
+      const status = typeof payload === 'string' ? payload : payload?.status;
+      if (!status) return;
+      const extra = typeof payload === 'object' && payload ? { ...payload } : {};
+      if (normalizeStatus(status) === 'failed' && extra.error && !extra.failureCode) {
+        const failure = describeFailure(new Error(String(extra.error)));
+        extra.failureCode = failure.code;
+        extra.error = failure.message;
+      }
+      setRunPhase(run, status, extra);
+    },
+    /* Agent A dispatches already-typed Pi events; emit them verbatim. Legacy
+       runtimes that only call `tool` with a loose payload still work. */
+    tool: (payload = {}) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.kind === 'file.changed') return;
+      const { kind, ...rest } = payload;
+      const type = typeof kind === 'string' ? kind : (payload.phase === 'completed' || payload.status === 'completed' ? 'tool.completed' : 'tool.started');
+      emitTyped(conversationId, runId, type, rest);
+    },
+    todo: (payload) => {
+      const todos = Array.isArray(payload) ? payload : payload?.todos;
+      if (!Array.isArray(todos)) return;
+      store.db.prepare('UPDATE commands SET todos=? WHERE id=?').run(JSON.stringify(todos).slice(0, 200000), runId);
+      emitTyped(conversationId, runId, 'todo.updated', { todos });
+    },
+    usage: (payload = {}) => {
+      if (!payload || typeof payload !== 'object') return;
+      const summary = {
+        input: payload.input ?? payload.tokens?.input ?? null,
+        output: payload.output ?? payload.tokens?.output ?? null,
+        cacheRead: payload.cacheRead ?? payload.tokens?.cache?.read ?? null,
+        cacheWrite: payload.cacheWrite ?? payload.tokens?.cache?.write ?? null,
+        cost: payload.cost ?? null,
+      };
+      store.db.prepare('UPDATE commands SET summary=? WHERE id=?').run(JSON.stringify({ usage: summary }).slice(0, 100000), runId);
+      emitTyped(conversationId, runId, 'usage.updated', { ...payload, kind: undefined });
+    },
+    question: (payload, questions) => {
+      const id = payload && typeof payload === 'object' ? payload.interactionId : payload;
+      const list = payload && typeof payload === 'object' ? payload.questions : questions;
+      if (id) registerInteraction(run, id, 'question', { questions: list });
+    },
+    permission: (payload, action, detail) => {
+      if (payload && typeof payload === 'object') {
+        if (!payload.interactionId) return;
+        registerInteraction(run, payload.interactionId, 'permission', { action: payload.action, detail: payload.detail });
+      } else if (payload) {
+        registerInteraction(run, payload, 'permission', { action, detail });
+      }
+    },
+    fileChanged: (payload = {}) => emitTyped(conversationId, runId, 'file.changed', {
+      path: payload.path || payload.file || null,
+      change: payload.change || 'modified',
+      additions: payload.additions ?? 0,
+      deletions: payload.deletions ?? 0,
+      toolCallId: payload.toolCallId || null,
+    }),
+    diff: (payload) => {
+      const files = Array.isArray(payload) ? payload : (payload?.files || []);
+      emitTyped(conversationId, runId, 'git.diff.updated', { worktreeId: payload?.worktreeId || run.worktree?.id || null, files });
+    },
+    attention: (payload = {}) => {
+      const attention = payload.attention || 'none';
+      store.db.prepare('UPDATE commands SET attention=? WHERE id=?').run(attention, runId);
+      emitTyped(conversationId, runId, 'attention.changed', { attention });
+    },
+    activity: (activity) => emitTyped(conversationId, runId, 'run.activity', { activity }),
+    text: (delta) => {
+      if (typeof delta === 'string' && delta) emitTyped(conversationId, runId, 'text.delta', { delta });
+    },
+  };
+}
 
 /* ---- Providers, connections and catalog ---- */
 
@@ -226,6 +461,53 @@ function defaultModel(engine, projectId) {
 }
 const withCapabilities = (session) => ({ ...session, capabilities: CAPABILITIES[session.engine] || {} });
 
+/* ---- AGENTS.md (PLAN §1.10) ---- */
+
+const AGENTS_FILENAME = 'AGENTS.md';
+
+async function readTextFile(file) {
+  try { return await readFile(file, 'utf8'); } catch { return null; }
+}
+
+function agentsFileList(root, target) {
+  const list = [{ scope: 'global', path: GLOBAL_AGENTS, label: 'Global (~/.config/workbench)' }];
+  if (!root) return list;
+  let base;
+  try { base = canonical(root); } catch { return list; }
+  list.push({ scope: 'project', path: path.join(base, AGENTS_FILENAME), label: 'Project root' });
+  if (target) {
+    const current = path.resolve(target);
+    if (current !== base && current.startsWith(`${base}${path.sep}`)) {
+      let walk = base;
+      for (const part of path.relative(base, current).split(path.sep).filter(Boolean)) {
+        walk = path.join(walk, part);
+        list.push({ scope: 'nested', path: path.join(walk, AGENTS_FILENAME), label: path.relative(base, walk) });
+      }
+    }
+  }
+  const seen = new Set();
+  return list.filter((item) => { if (seen.has(item.path)) return false; seen.add(item.path); return true; });
+}
+
+async function collectAgents(projectId, target) {
+  const p = projectId ? store.projects().find((candidate) => candidate.id === projectId) : null;
+  const files = [];
+  for (const item of agentsFileList(p?.directory || null, target)) {
+    const content = await readTextFile(item.path);
+    files.push({ ...item, exists: content !== null, content: content || '' });
+  }
+  return files;
+}
+
+/* Applicable instructions merged for the runtime context: global, project root,
+   then nested AGENTS.md files from the project root down to the run directory. */
+async function projectInstructions(conversation) {
+  const target = conversation.root_directory || conversation.directory;
+  const files = (await collectAgents(conversation.project_id, target)).filter((file) => file.exists && file.content.trim());
+  if (!files.length) return '';
+  return files.map((file) => `# AGENTS.md — ${file.label}\n${file.content.trim()}`).join('\n\n').slice(0, 100000);
+}
+
 /* ---- Message persistence ---- */
 
 function safePart(part, conversationId) {
@@ -261,6 +543,13 @@ function persistMessage(conversationId, commandId, message) {
     cost: message.info.cost,
   };
   const normalized = { ...message, info, parts: message.parts.map((part) => safePart(part, conversationId)) };
+  /* Empty assistant frames (no prose, no tools, no files, no error) are noise
+     in the transcript — skip them instead of persisting blanks. */
+  if (info.role === 'assistant'
+    && !message.info.error
+    && !normalized.parts.some((part) => (part.type === 'text' && String(part.text || '').trim()) || part.type === 'tool' || part.type === 'file')) {
+    return;
+  }
   store.message(conversationId, normalized, commandId);
   store.recordUsage(message.id, conversationId, commandId, info);
 }
@@ -302,6 +591,48 @@ function importProjects() {
   } catch {}
 }
 
+let lastLegacySync = 0;
+
+/* Native opencode sessions created outside Workbench (terminal runs) must
+   show up on the next list load, and sessions continued in the terminal must
+   move up by their last activity. Workbench-owned native sessions are bound
+   via conversations.native_id and stay untouched. */
+function syncLegacySessions(force = false) {
+  if (!legacy) return;
+  const now = Date.now();
+  if (!force && now - lastLegacySync < 10_000) return;
+  lastLegacySync = now;
+  const rows = legacy.prepare('SELECT id,title,directory,parent_id,time_created,time_updated,model FROM session WHERE parent_id IS NULL').all();
+  const bound = new Set(store.db.prepare('SELECT native_id FROM conversations WHERE native_id IS NOT NULL').all().map((row) => row.native_id));
+  const known = new Set(store.db.prepare('SELECT id FROM conversations').all().map((row) => row.id));
+  let changed = false;
+  store.transaction(() => {
+    for (const row of rows) {
+      if (!row.directory || row.directory.startsWith('/tmp/opencode/workbench-')) continue;
+      if (bound.has(row.id)) continue;
+      if (!known.has(row.id)) {
+        const p = store.projectFor(row.directory);
+        const m = decode(row.model);
+        store.db.prepare(`INSERT OR IGNORE INTO conversations(id,title,engine,directory,project_id,legacy_id,model,pinned,hidden,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(row.id, String(row.title || 'Imported conversation').slice(0, 120), 'opencode', row.directory, p?.id || null, row.id,
+            m?.providerID && m?.id ? `${m.providerID}/${m.id}` : null, 0, 0, row.time_created, row.time_updated);
+        changed = true;
+        continue;
+      }
+      const current = store.db.prepare('SELECT updated FROM conversations WHERE id=?').get(row.id);
+      const updates = [];
+      const values = [];
+      if (Number(row.time_updated || 0) > Number(current?.updated || 0)) { updates.push('updated=?'); values.push(row.time_updated); }
+      if (row.title && !store.getSetting(`title.${row.id}`)) { updates.push('title=?'); values.push(String(row.title).slice(0, 120)); }
+      if (updates.length) {
+        store.db.prepare(`UPDATE conversations SET ${updates.join(',')} WHERE id=?`).run(...values, row.id);
+        changed = true;
+      }
+    }
+    if (changed) store.event('conversation.changed', null);
+  });
+}
+
 function importLegacy() {
   if (!legacy) return;
   const archive = path.join(HOME, '.local/share/workbench/legacy-archive');
@@ -314,8 +645,9 @@ function importLegacy() {
   const metadata = decode(readJson('session-meta.json'), {});
   const preferences = decode(readJson('session-models.json'), {});
   const rows = legacy.prepare('SELECT id,title,directory,parent_id,time_created,time_updated,model FROM session').all();
+  const bound = new Set(store.db.prepare('SELECT native_id FROM conversations WHERE native_id IS NOT NULL').all().map((item) => item.native_id));
   store.transaction(() => {
-    for (const row of rows.filter((item) => !item.parent_id && !item.directory.startsWith('/tmp/opencode/workbench-'))) {
+    for (const row of rows.filter((item) => !item.parent_id && !item.directory.startsWith('/tmp/opencode/workbench-') && !bound.has(item.id))) {
       const p = store.projectFor(row.directory);
       const m = decode(row.model);
       store.db.prepare(`INSERT OR IGNORE INTO conversations(id,title,engine,directory,project_id,legacy_id,model,pinned,hidden,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
@@ -409,7 +741,7 @@ async function importClips() {
 
 function reconcileRecordedRuns() {
   if (!legacy) return;
-  for (const command of store.db.prepare("SELECT r.*,c.native_id,c.engine FROM commands r JOIN conversations c ON c.id=r.conversation_id WHERE r.status IN ('interrupted','uncertain') AND c.engine='opencode' AND r.native_message IS NOT NULL").all()) {
+  for (const command of store.db.prepare("SELECT r.*,c.native_id,c.engine FROM commands r JOIN conversations c ON c.id=r.conversation_id WHERE r.status IN ('interrupted','interrupted_by_restart','failed','uncertain') AND c.engine='opencode' AND r.native_message IS NOT NULL").all()) {
     const messages = legacy.prepare("SELECT id,time_created,data FROM message WHERE session_id=? AND json_extract(data,'$.parentID')=? ORDER BY time_created,id").all(command.native_id, command.native_message);
     let complete = false;
     for (const row of messages) {
@@ -419,7 +751,7 @@ function reconcileRecordedRuns() {
       persistMessage(command.conversation_id, command.id, { id: row.id, created: row.time_created, info, parts });
       if (info.time?.completed && info.finish && !['tool-calls', 'unknown'].includes(info.finish) && !info.error) complete = true;
     }
-    if (complete) store.status(command.id, 'succeeded');
+    if (complete) store.status(command.id, 'completed');
   }
 }
 
@@ -432,77 +764,97 @@ function availableBytes() {
     return os.freemem();
   }
 }
-function activeRunCount() {
-  let count = 0;
-  for (const run of runs.values()) if (!run.waiting) count += 1;
-  return count;
+/* A mutating Pi build run in a Git project is isolated in a worktree (§12).
+   Read-only/plan runs and General chats run directly (§13). */
+function shouldIsolate(conversation) {
+  return conversation.engine === 'pi' && conversation.mode === 'build' && !!conversation.project_id;
 }
-function workspaceBusy(directory) {
-  for (const run of runs.values()) if (run.conversation.directory === directory) return true;
-  return false;
+
+async function ensureWorktree(conversation, runId) {
+  const p = store.projects().find((candidate) => candidate.id === conversation.project_id);
+  if (!p) return null;
+  const root = canonical(p.directory);
+  if (!(await isGitRepo(root))) return null;
+  const existing = store.db.prepare("SELECT * FROM worktrees WHERE conversation_id=? AND status IN ('active','conflict') ORDER BY created DESC LIMIT 1").get(conversation.id);
+  if (existing && existsSync(existing.path)) {
+    store.db.prepare('UPDATE worktrees SET run_id=?, updated=? WHERE id=?').run(runId, Date.now(), existing.id);
+    return { id: existing.id, path: existing.path, branch: existing.branch, baseBranch: existing.base_branch, baseCommit: existing.base_commit, root };
+  }
+  const worktree = await createWorktree({ projectId: p.id, conversationId: conversation.id, runId, root });
+  store.db.prepare('INSERT INTO worktrees(id,project_id,conversation_id,run_id,path,branch,base_branch,base_commit,status,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+    .run(worktree.id, p.id, conversation.id, runId, worktree.path, worktree.branch, worktree.baseBranch, worktree.baseCommit, 'active', Date.now(), Date.now());
+  return worktree;
 }
 
 function startRun(command) {
   const conversation = store.conversation(command.conversation_id);
   const runtime = conversation.engine === 'pi' ? pi : oc;
-  const run = { command, conversation, runtime, cancelled: false, waiting: false };
+  const run = { command, conversation, runtime, cancelled: false, waiting: false, phase: 'queued', previousPhase: null, started: Date.now(), heartbeat: Date.now(), worktree: null };
   runs.set(conversation.id, run);
-  store.status(command.id, 'starting');
+  store.db.prepare('UPDATE commands SET engine=?, provider=?, heartbeat=? WHERE id=?')
+    .run(conversation.engine, modelInfo(command.model, conversation.engine)?.provider || null, Date.now(), command.id);
+  setRunPhase(run, 'starting');
   void (async () => {
+    let baseline = null;
+    let runtimeConversation = conversation;
     try {
       canonical(conversation.directory);
       validateModel(command.model, conversation.engine);
-      const baseline = await captureBaseline(conversation.directory);
       const input = decode(command.input, {});
       const attachments = attachmentsFor((input.attachments || []).map((attachment) => attachment.id));
       if (attachments.some((attachment) => attachment.mime.startsWith('image/')) && !modelInfo(command.model, conversation.engine)?.images) {
         throw fail('Selected model does not accept images. Choose a vision model.');
       }
+      if (shouldIsolate(conversation)) {
+        try {
+          const worktree = await ensureWorktree(conversation, command.id);
+          if (worktree) {
+            run.worktree = worktree;
+            runtimeConversation = { ...conversation, directory: worktree.path, root_directory: conversation.directory };
+            store.db.prepare('UPDATE commands SET worktree_id=? WHERE id=?').run(worktree.id, command.id);
+            emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: worktree.id, files: [] });
+          }
+        } catch (error) {
+          emitTyped(conversation.id, command.id, 'run.warning', { message: `Worktree isolation unavailable, running in place: ${error.message}` });
+        }
+      }
+      if (!run.worktree) baseline = await captureBaseline(conversation.directory);
       const handoff = !conversation.native_id ? store.getSetting(`handoff.${conversation.id}`) : null;
-      const runtimeCommand = handoff
-        ? { ...command, input: JSON.stringify({ ...input, text: `Previous conversation context (reference only):\n${handoff}\n\nCurrent request:\n${input.text}` }) }
-        : command;
-      await runtime.run(conversation, runtimeCommand, attachments, {
-        binding: (nativeId) => store.db.prepare('UPDATE conversations SET native_id=? WHERE id=?').run(nativeId, conversation.id),
-        nativeMessage: (id) => store.db.prepare('UPDATE commands SET native_message=? WHERE id=?').run(id, command.id),
-        running: () => {
-          if (run.cancelled) throw new Error('Run cancelled before dispatch.');
-          store.status(command.id, 'running');
-        },
-        message: (message) => persistMessage(conversation.id, command.id, message),
-        interaction: (id, kind, data) => {
-          const previous = store.db.prepare('SELECT status FROM interactions WHERE id=?').get(id);
-          if (previous) return;
-          store.db.prepare('INSERT INTO interactions(id,conversation_id,kind,data) VALUES (?,?,?,?)').run(id, conversation.id, kind, JSON.stringify(data));
-          run.waiting = true;
-          store.status(command.id, 'waiting');
-          store.event('interaction.created', conversation.id);
-          void tick();
-        },
-        interactionClosed: (id) => {
-          store.db.prepare("UPDATE interactions SET status='answered' WHERE id=?").run(id);
-          run.waiting = false;
-          if (!run.cancelled) store.status(command.id, 'running');
-          void tick();
-        },
-      });
-      if (run.cancelled) store.status(command.id, 'cancelled');
-      else {
-        store.status(command.id, 'succeeded');
+      let context = '';
+      try { context = await projectInstructions(runtimeConversation); } catch {}
+      /* AGENTS.md instructions ride along as command context; because the Pi
+         runner does not yet consume `context`, they are also prepended to the
+         prompt so they actually reach the model. The stored user message keeps
+         the original text. */
+      const prefix = context.trim() ? `Project instructions (AGENTS.md) that apply to this request:\n${context.trim()}\n\n---\n\n` : '';
+      const baseText = handoff ? `Previous conversation context (reference only):\n${handoff}\n\nCurrent request:\n${input.text}` : input.text;
+      const runtimeCommand = { ...command, input: JSON.stringify({ ...input, text: `${prefix}${baseText}` }), context, instructions: context };
+      await runtime.run(runtimeConversation, runtimeCommand, attachments, runtimeHooks(run, command, conversation));
+      if (run.cancelled) {
+        setRunPhase(run, 'cancelled');
+      } else {
+        setRunPhase(run, 'completed');
+        createNotification(store, { kind: 'run.completed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” finished`, severity: 'success' });
         void (async () => {
           try {
-            const summary = await summarizeChanges(conversation.directory, baseline);
-            if (summary) store.db.prepare('INSERT OR REPLACE INTO artifacts VALUES (?,?,?)').run(`changes_${command.id}`, conversation.id, JSON.stringify(summary));
+            const summary = run.worktree ? await worktreeChanges(run.worktree) : await summarizeChanges(conversation.directory, baseline);
+            if (summary) {
+              store.db.prepare('INSERT OR REPLACE INTO artifacts VALUES (?,?,?)').run(`changes_${command.id}`, conversation.id, JSON.stringify(summary));
+              if (run.worktree) emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: run.worktree.id, files: summary.files });
+            }
           } catch {}
           await maybeGenerateTitle(conversation.id).catch(() => {});
         })();
       }
     } catch (error) {
-      store.status(
-        command.id,
-        run.cancelled ? 'cancelled' : error.uncertain ? 'uncertain' : 'failed',
-        run.cancelled ? null : error.message,
-      );
+      if (run.cancelled) {
+        setRunPhase(run, 'cancelled', { error: null, failureCode: null });
+      } else {
+        const failure = describeFailure(error);
+        setRunPhase(run, 'failed', { error: failure.message, failureCode: failure.code });
+        createNotification(store, { kind: 'run.failed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” failed`, body: failure.message, severity: 'error' });
+        console.warn(JSON.stringify({ event: 'run_failed', conversationId: conversation.id, runId: command.id, failureCode: failure.code, message: String(error?.message || error).slice(0, 500) }));
+      }
     } finally {
       runs.delete(conversation.id);
       void tick();
@@ -515,9 +867,13 @@ async function tick() {
   scheduling = true;
   try {
     if (availableBytes() < MIN_FREE_MB * 1024 * 1024) return;
-    while (activeRunCount() < MAX_RUNS) {
+    while (runCapacityCount() < maxRuns()) {
       const candidates = store.db.prepare("SELECT c.* FROM commands c JOIN conversations s ON s.id=c.conversation_id WHERE c.status='queued' AND s.paused=0 ORDER BY c.created,c.id LIMIT 25").all();
-      const command = candidates.find((candidate) => !runs.has(candidate.conversation_id) && !workspaceBusy(store.conversation(candidate.conversation_id).directory));
+      const command = candidates.find((candidate) => {
+        if (runs.has(candidate.conversation_id)) return false;
+        const conversation = store.conversation(candidate.conversation_id);
+        return !workspaceLeased(conversation.directory, candidate.conversation_id);
+      });
       if (!command) break;
       startRun(command);
     }
@@ -668,86 +1024,6 @@ async function killProcess(req, res, pid) {
   return json(res, 200, { killed: true, pid, signal });
 }
 
-function transcriptFor(conversationId) {
-  const page = messagesPage(store.conversation(conversationId));
-  return page.messages
-    .map((message) => {
-      if (!['user', 'assistant'].includes(message.info?.role)) return null;
-      const text = message.parts.filter((part) => part.type === 'text').map((part) => part.text || '').join('\n').trim();
-      return text ? `${message.info.role === 'user' ? 'User' : 'Assistant'}: ${text}` : null;
-    })
-    .filter(Boolean)
-    .join('\n\n')
-    .slice(-8000);
-}
-
-async function assistant(req, res) {
-  const b = await body(req);
-  const conversationId = typeof b.conversationId === 'string' ? b.conversationId : '';
-  if (!conversationId) throw fail('Conversation is required.');
-  const auth = await readAuth();
-  const apiKey = auth['opencode-go']?.key;
-  if (!apiKey) throw fail('No OpenCode Go credentials are available.', 503);
-  const transcript = transcriptFor(conversationId);
-  const history = (Array.isArray(b.messages) ? b.messages : [])
-    .filter((message) => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
-    .slice(-20)
-    .map((message) => ({ role: message.role, content: message.content.slice(0, 8000) }));
-  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-  res.flushHeaders();
-  const send = (payload) => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-  const controller = new AbortController();
-  res.on('close', () => controller.abort());
-  try {
-    const upstream = await fetch('https://opencode.ai/zen/go/v1/chat/completions', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-opencode-session': conversationId },
-      body: JSON.stringify({
-        model: 'deepseek-v4-flash',
-        stream: true,
-        max_tokens: 1200,
-        temperature: 0.3,
-        messages: [
-          { role: 'system', content: `You are Workbench Assistant, a read-only helper inside a coding console. Answer questions about the conversation below. Be concise. You cannot run commands or change files.\n\nCONVERSATION (oldest first, truncated):\n${transcript}` },
-          ...history,
-        ],
-      }),
-      signal: controller.signal,
-    });
-    if (!upstream.ok) {
-      const detail = (await upstream.text().catch(() => '')).slice(0, 500);
-      throw new Error(`OpenCode Go request failed (${upstream.status})${detail ? `: ${detail}` : ''}`);
-    }
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let index;
-      while ((index = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, index).trim();
-        buffer = buffer.slice(index + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta) send({ delta });
-        } catch {}
-      }
-    }
-    send({ done: true });
-    res.end();
-  } catch (error) {
-    send({ error: error.name === 'AbortError' ? 'The assistant request was cancelled.' : error.message || 'The assistant request failed.' });
-    res.end();
-  }
-}
-
 /* ---- HTTP ---- */
 
 function json(res, status, value) {
@@ -796,7 +1072,7 @@ function streamEvents(req, res, url) {
     res.write(`id: ${latest}\ndata: ${JSON.stringify({ type: 'resync', seq: latest })}\n\n`);
     cursor = latest;
   } else {
-    for (const row of rows) send({ seq: row.seq, type: row.type, conversationId: row.conversation_id, ...decode(row.data, {}) });
+    for (const row of rows) send({ seq: row.seq, type: row.type, kind: row.kind || row.type, conversationId: row.conversation_id, runId: row.run_id || null, ...decode(row.data, {}) });
   }
   store.listeners.add(send);
   const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20000);
@@ -839,10 +1115,11 @@ async function routes(req, res) {
   const route = url.pathname.replace(/^\/api\/v2/, '');
   const method = req.method;
 
-  if (route === '/health') return json(res, 200, { ok: true, version: 3, runs: [...runs.values()].map((run) => ({ conversationId: run.conversation.id, commandId: run.command.id, waiting: run.waiting })), maxRuns: MAX_RUNS });
+  if (route === '/health') return json(res, 200, { ok: true, version: 3, runs: [...runs.values()].map((run) => ({ conversationId: run.conversation.id, commandId: run.command.id, phase: run.phase, waiting: run.waiting, worktreeId: run.worktree?.id || null })), maxRuns: maxRuns(), active: runCapacityCount(), queued: store.queued(), worktrees: WORKTREES });
   if (route === '/events' && method === 'GET') return streamEvents(req, res, url);
 
   if (route === '/bootstrap' && method === 'GET') {
+    syncLegacySessions();
     const list = store.list({ limit: 60 });
     return json(res, 200, {
       ...list,
@@ -852,8 +1129,13 @@ async function routes(req, res) {
       seq: store.sequence(),
       defaults: { opencode: defaultModel('opencode'), pi: defaultModel('pi') },
       engines: ['opencode', 'pi'],
+      defaultEngine: 'pi',
       capabilities: CAPABILITIES,
-      maxRuns: MAX_RUNS,
+      maxRuns: maxRuns(),
+      active: runCapacityCount(),
+      queued: store.queued(),
+      worktrees: WORKTREES,
+      notifications: Number(store.db.prepare('SELECT count(*) AS n FROM notifications WHERE read=0').get().n),
     });
   }
 
@@ -867,10 +1149,16 @@ async function routes(req, res) {
   const projectMatch = /^\/projects\/([^/]+)$/.exec(route);
   if (projectMatch && method === 'DELETE') {
     const p = project(projectMatch[1]);
+    /* Best-effort cleanup of any isolated worktrees before the project row goes
+       away; the user's original checkout is never touched. */
+    for (const row of store.db.prepare('SELECT * FROM worktrees WHERE project_id=?').all(p.id)) {
+      await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, p.directory).catch(() => {});
+    }
     store.transaction(() => {
       store.db.prepare('UPDATE conversations SET project_id=NULL WHERE project_id=?').run(p.id);
       store.db.prepare('UPDATE clips SET project_id=NULL WHERE project_id=?').run(p.id);
       store.db.prepare('DELETE FROM workspaces WHERE project_id=?').run(p.id);
+      store.db.prepare('DELETE FROM worktrees WHERE project_id=?').run(p.id);
       store.db.prepare('DELETE FROM projects WHERE id=?').run(p.id);
       store.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`project.${p.id}.%`);
       store.event('projects.changed', null);
@@ -903,6 +1191,18 @@ async function routes(req, res) {
     void refreshCatalog().catch(() => {});
     return json(res, 202, { refreshing: true });
   }
+  if (route === '/settings' && method === 'GET') {
+    return json(res, 200, {
+      maxRuns: maxRuns(),
+      defaultMaxRuns: DEFAULT_MAX_RUNS,
+      maxRunsLimit: MAX_RUNS_LIMIT,
+      active: runCapacityCount(),
+      queued: store.queued(),
+      defaults: { opencode: defaultModel('opencode'), pi: defaultModel('pi') },
+      favorites: store.getSetting('favorites', []),
+      smtp: publicSmtpConfig(store),
+    });
+  }
   if (route === '/settings' && method === 'POST') {
     const b = await body(req);
     if (b.defaultModel) {
@@ -911,8 +1211,20 @@ async function routes(req, res) {
       store.setSetting(`default.${engine}`, b.defaultModel);
     }
     if (Array.isArray(b.favorites)) store.setSetting('favorites', b.favorites.filter((value) => typeof value === 'string').slice(0, 100));
+    if (b.maxRuns !== undefined) {
+      const value = Number(b.maxRuns);
+      if (!Number.isInteger(value) || value < MIN_RUNS || value > MAX_RUNS_LIMIT) throw fail(`maxRuns must be an integer between ${MIN_RUNS} and ${MAX_RUNS_LIMIT}.`);
+      store.setSetting('maxRuns', value);
+      store.event('settings.changed', null, { maxRuns: value }, { kind: 'settings.changed' });
+      /* A raised limit should drain the queue without waiting for the next tick. */
+      void tick();
+    }
+    if (b.smtp !== undefined) {
+      saveSmtpConfig(store, b.smtp);
+      store.event('settings.changed', null, { smtp: true }, { kind: 'settings.changed' });
+    }
     store.event('models.changed', null);
-    return json(res, 200, { ok: true });
+    return json(res, 200, { ok: true, maxRuns: maxRuns(), smtp: publicSmtpConfig(store) });
   }
 
   if (route === '/connections' && method === 'GET') return json(res, 200, { connections: await connections() });
@@ -951,12 +1263,15 @@ async function routes(req, res) {
   }
 
   if (route === '/conversations' && method === 'GET') {
+    syncLegacySessions();
     const result = store.list({ projectId: url.searchParams.get('projectId') ?? undefined, q: (url.searchParams.get('q') || '').slice(0, 200), before: url.searchParams.get('cursor') || undefined, hidden: url.searchParams.get('hidden') === 'true' });
     return json(res, 200, { ...result, sessions: result.sessions.map(withCapabilities) });
   }
   if (route === '/conversations' && method === 'POST') {
     const b = await body(req);
-    if (!['opencode', 'pi'].includes(b.engine)) throw fail('Choose OpenCode or Pi.');
+    /* Pi is the default engine; OpenCode remains available as an explicit,
+       advanced adapter (PLAN §1.1). */
+    const engine = b.engine === 'opencode' ? 'opencode' : 'pi';
     const p = project(b.projectId);
     if (b.workspace && (!p || ![p.directory, ...(p.workspaces || [])].includes(b.workspace))) throw fail('Choose a workspace belonging to this project.');
     const directory = p ? canonical(b.workspace || p.directory) : GENERAL;
@@ -964,18 +1279,71 @@ async function routes(req, res) {
     if (!/^[\w-]{8,100}$/.test(id)) throw fail('Invalid conversation ID.');
     const existing = store.db.prepare('SELECT * FROM conversations WHERE id=?').get(id);
     if (existing) {
-      if (existing.engine !== b.engine || existing.project_id !== (p?.id || null)) throw fail('Conversation ID conflict.', 409);
+      if (existing.engine !== engine || existing.project_id !== (p?.id || null)) throw fail('Conversation ID conflict.', 409);
       return json(res, 200, { session: withCapabilities(store.view(existing)) });
     }
-    const model = validateModel(b.model || defaultModel(b.engine, p?.id), b.engine);
-    const session = store.createConversation({ id, title: String(b.title || 'New conversation'), engine: b.engine, directory, projectId: p?.id || null, model, mode: b.mode === 'plan' ? 'plan' : 'build' });
+    const chosen = b.model || defaultModel(engine, p?.id);
+    if (!chosen && engine === 'pi') throw fail('No Pi model is available yet. Connect a provider API key, or start an OpenCode (advanced) chat.', 409);
+    const model = validateModel(chosen, engine);
+    const session = store.createConversation({ id, title: String(b.title || 'New conversation'), engine, directory, projectId: p?.id || null, model, mode: b.mode === 'plan' ? 'plan' : 'build' });
     return json(res, 201, { session: withCapabilities(store.view(session)) });
+  }
+
+  const promptsMatch = /^\/conversations\/([^/]+)\/prompts$/.exec(route);
+  if (promptsMatch && method === 'GET') {
+    const c = store.conversation(promptsMatch[1]);
+    const byId = new Map();
+    for (const row of store.db.prepare('SELECT id,created,data FROM messages WHERE conversation_id=? ORDER BY created,id').all(c.id)) {
+      const message = decode(row.data, {});
+      if (message?.info?.role !== 'user') continue;
+      const text = (message.parts || []).filter((part) => part.type === 'text').map((part) => part.text || '').join(' ').replace(/\s+/g, ' ').trim();
+      byId.set(message.id, { id: message.id, preview: text.slice(0, 100), created: row.created });
+    }
+    if (c.legacy_id && legacy) {
+      const rows = legacy.prepare(`SELECT m.id AS id, m.time_created AS created, json_extract(p.data,'$.text') AS text
+        FROM message m JOIN part p ON p.message_id=m.id
+        WHERE m.session_id=? AND json_extract(m.data,'$.role')='user' AND json_extract(p.data,'$.type')='text'
+        ORDER BY m.time_created ASC, p.time_created ASC`).all(c.legacy_id);
+      for (const row of rows) {
+        if (byId.has(row.id)) continue;
+        const preview = String(row.text || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+        byId.set(row.id, { id: row.id, preview, created: row.created });
+      }
+    }
+    const prompts = [...byId.values()].sort((a, b) => Number(a.created || 0) - Number(b.created || 0));
+    return json(res, 200, { prompts });
+  }
+
+  const steerMatch = /^\/conversations\/([^/]+)\/steer$/.exec(route);
+  if (steerMatch && method === 'POST') {
+    const c = store.conversation(steerMatch[1]);
+    const b = await body(req);
+    const text = typeof b.text === 'string' ? b.text.trim() : '';
+    if (!text) throw fail('Write a message to steer with.');
+    if (text.length > 60000) throw fail('Message must be under 60,000 characters.');
+    const run = runs.get(c.id);
+    if (run && c.engine === 'pi' && typeof run.runtime?.steer === 'function' && await run.runtime.steer(c.id, text)) {
+      store.message(c.id, { id: `steer_${uid()}`, created: Date.now(), info: { role: 'user', steer: true }, parts: [{ id: uid('txt_'), type: 'text', text }] });
+      emitTyped(c.id, run.command.id, 'steer.delivered', { text });
+      return json(res, 202, { steered: true });
+    }
+    /* No live Pi worker to steer: keep it durable and let the queue run it. */
+    const model = validateModel(b.model || c.model || defaultModel(c.engine, c.project_id), c.engine);
+    const command = store.accept(c.id, { text, attachments: [] }, model, c.reasoning, b.clientCommandId || uid());
+    json(res, 202, { steered: false, queued: true, commandId: command.id });
+    void tick();
+    return;
   }
 
   const conversationMatch = /^\/conversations\/([^/]+)$/.exec(route);
   if (conversationMatch) {
     const c = store.conversation(conversationMatch[1]);
     if (method === 'GET') return json(res, 200, { session: withCapabilities(store.view(c, messagesPage(c, url.searchParams.get('before')))) });
+    if (method === 'DELETE') {
+      if (runs.has(c.id)) throw fail('Stop the running agent before deleting this conversation.', 409);
+      store.removeConversation(c.id);
+      return json(res, 200, { deleted: true });
+    }
     if (method === 'PATCH') {
       const b = await body(req);
       if (b.model) validateModel(b.model, c.engine);
@@ -985,7 +1353,21 @@ async function routes(req, res) {
         b.title = b.title.trim().slice(0, 120);
         store.setSetting(`title.${c.id}`, 'manual');
       }
-      return json(res, 200, { session: withCapabilities(store.patchConversation(c.id, b, b.revision)) });
+      const previousModel = c.model;
+      const session = store.patchConversation(c.id, b, b.revision);
+      /* Model switch is durable: old messages keep their own model in `info`,
+         new runs use the new model, and a system message records the change. */
+      if (b.model && b.model !== previousModel) {
+        const next = modelInfo(b.model, c.engine);
+        const previous = modelInfo(previousModel, c.engine);
+        const label = (m) => m ? `${m.name || m.id} (${m.provider})` : 'none';
+        store.message(c.id, {
+          id: uid('sys_'), created: Date.now(), info: { role: 'system', modelID: next?.id, providerID: next?.provider },
+          parts: [{ id: uid('txt_'), type: 'text', text: `Model changed from ${label(previous)} to ${label(next)}.` }],
+        });
+        emitTyped(c.id, null, 'model.changed', { from: previousModel, to: b.model, provider: next?.provider || null, engine: c.engine });
+      }
+      return json(res, 200, { session: withCapabilities(session) });
     }
   }
 
@@ -998,6 +1380,9 @@ async function routes(req, res) {
     if (text.length > 60000 || (!text && !attachments.length)) throw fail('Write a message or attach a file (maximum 60,000 characters).');
     const model = validateModel(b.model || c.model || defaultModel(c.engine, c.project_id), c.engine);
     if (attachments.some((attachment) => attachment.mime.startsWith('image/')) && !modelInfo(model, c.engine)?.images) throw fail('Select a model that supports images.', 409);
+    /* Sending a message is an explicit intent to continue: a queue paused by
+       Stop or by a failed/interrupted run must not swallow it silently. */
+    if (c.paused) store.patchConversation(c.id, { paused: false });
     const command = store.accept(c.id, { text, attachments: attachments.map(({ id, name, mime }) => ({ id, name, mime })) }, model, b.reasoning || c.reasoning, b.clientCommandId);
     json(res, 202, { commandId: command.id, status: command.status });
     void tick();
@@ -1013,8 +1398,11 @@ async function routes(req, res) {
       const run = runs.get(c.id);
       if (run) {
         run.cancelled = true;
-        store.status(run.command.id, 'stopping');
+        setRunPhase(run, 'interrupting');
         await run.runtime.stop(c.id);
+      } else {
+        const active = store.active(c.id);
+        if (active) store.status(active.id, 'cancelled');
       }
       void tick();
       return json(res, 200, { stopped: true });
@@ -1049,7 +1437,7 @@ async function routes(req, res) {
   if (commandMatch) {
     const command = store.db.prepare('SELECT * FROM commands WHERE id=?').get(commandMatch[1]);
     if (!command) throw fail('Command not found.', 404);
-    if (method === 'GET') return json(res, 200, { id: command.id, status: command.status, conversationId: command.conversation_id, error: command.error || null });
+    if (method === 'GET') return json(res, 200, { id: command.id, status: command.status, conversationId: command.conversation_id, error: command.error || null, failureCode: command.failure_code || null });
     if (method === 'DELETE') {
       if (command.status !== 'queued') throw fail('Only queued messages can be removed.', 409);
       store.status(command.id, 'cancelled');
@@ -1061,7 +1449,7 @@ async function routes(req, res) {
   if (retryMatch && method === 'POST') {
     const command = store.db.prepare('SELECT * FROM commands WHERE id=?').get(retryMatch[1]);
     if (!command) throw fail('Command not found.', 404);
-    if (!['failed', 'interrupted', 'uncertain', 'cancelled'].includes(command.status)) throw fail('Only a finished command can be retried.', 409);
+    if (!['failed', 'interrupted', 'interrupted_by_restart', 'cancelled'].includes(command.status)) throw fail('Only a finished command can be retried.', 409);
     const conversation = store.conversation(command.conversation_id);
     const input = decode(command.input, {});
     const newId = uid();
@@ -1080,15 +1468,17 @@ async function routes(req, res) {
     const b = await body(req);
     if (interaction.kind === 'permission' && !['once', 'always', 'reject'].includes(b.reply)) throw fail('Invalid permission response.');
     if (interaction.kind === 'question' && !b.reject && (!Array.isArray(b.answers) || !b.answers.every((answer) => Array.isArray(answer) && answer.every((value) => typeof value === 'string')))) throw fail('Choose an answer.');
+    const conversation = store.conversation(interaction.conversation_id);
+    const runtime = conversation.engine === 'pi' ? pi : oc;
+    if (typeof runtime.respond !== 'function') throw fail('This engine does not support interactive requests yet.', 409);
     store.db.prepare("UPDATE interactions SET status='responding' WHERE id=? AND status='pending'").run(interaction.id);
     try {
-      await oc.respond(store.conversation(interaction.conversation_id), interaction, b);
-      store.db.prepare("UPDATE interactions SET status='answered' WHERE id=?").run(interaction.id);
-      store.event('interaction.answered', interaction.conversation_id);
+      await runtime.respond(conversation, interaction, b);
       const run = runs.get(interaction.conversation_id);
-      if (run) {
-        run.waiting = false;
-        if (!run.cancelled) store.status(run.command.id, 'running');
+      if (run) closeInteraction(run, interaction.id);
+      else {
+        store.db.prepare("UPDATE interactions SET status='answered' WHERE id=?").run(interaction.id);
+        store.event('interaction.answered', interaction.conversation_id);
       }
       return json(res, 200, { answered: true });
     } catch (error) {
@@ -1148,7 +1538,10 @@ async function routes(req, res) {
   if (fileContentMatch && method === 'GET') {
     const p = project(fileContentMatch[1]);
     const root = canonical(p.directory);
-    const target = canonical(path.resolve(root, String(url.searchParams.get('path') || '')));
+    const requested = String(url.searchParams.get('path') || '');
+    if (!requested) throw fail('A file path is required.');
+    let target;
+    try { target = realpathSync(path.resolve(root, requested)); } catch { throw fail('File not found.', 404); }
     if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw fail('That file is outside the project.', 400);
     const info = statSync(target);
     if (!info.isFile() || info.size > 1024 * 1024) throw fail('Choose a file smaller than 1 MB.', 413);
@@ -1156,6 +1549,137 @@ async function routes(req, res) {
     const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.md': 'text/markdown', '.json': 'application/json' }[extension] || 'text/plain';
     res.writeHead(200, { 'content-type': mime, 'content-length': info.size, 'cache-control': 'private, max-age=60', 'x-content-type-options': 'nosniff' });
     return createReadStream(target).pipe(res);
+  }
+
+  /* ---- Git worktrees (PLAN §12/§13) ---- */
+
+  const worktreeRecord = (row) => ({
+    id: row.id, path: row.path, branch: row.branch, baseBranch: row.base_branch, baseCommit: row.base_commit,
+    projectId: row.project_id, conversationId: row.conversation_id, runId: row.run_id,
+  });
+  const worktreeByRun = (runId) => store.db.prepare('SELECT * FROM worktrees WHERE run_id=? ORDER BY created DESC LIMIT 1').get(runId)
+    || store.db.prepare('SELECT * FROM worktrees WHERE id=?').get(runId);
+  const worktreeRootFor = (row) => {
+    const p = store.projects().find((candidate) => candidate.id === row.project_id);
+    if (!p) throw fail('Project not found.', 404);
+    return canonical(p.directory);
+  };
+
+  if (route === '/worktrees' && method === 'GET') {
+    const clauses = [];
+    const args = [];
+    if (url.searchParams.get('projectId')) { clauses.push('project_id=?'); args.push(url.searchParams.get('projectId')); }
+    if (url.searchParams.get('status')) { clauses.push('status=?'); args.push(url.searchParams.get('status')); }
+    const rows = store.db.prepare(`SELECT * FROM worktrees ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created DESC LIMIT 200`).all(...args);
+    return json(res, 200, { root: WORKTREES, worktrees: rows.map((row) => ({ ...worktreeRecord(row), status: row.status, error: row.error || null, created: row.created, updated: row.updated })) });
+  }
+
+  const runChangesMatch = /^\/runs\/([^/]+)\/changes$/.exec(route);
+  const conversationChangesMatch = /^\/conversations\/([^/]+)\/changes$/.exec(route);
+  if ((runChangesMatch || conversationChangesMatch) && method === 'GET') {
+    const row = runChangesMatch ? worktreeByRun(runChangesMatch[1])
+      : store.db.prepare('SELECT * FROM worktrees WHERE conversation_id=? ORDER BY created DESC LIMIT 1').get(conversationChangesMatch[1]);
+    if (!row) return json(res, 200, { status: 'none', files: [], additions: 0, deletions: 0, patch: '' });
+    const info = await worktreeChanges(worktreeRecord(row), { includePatch: url.searchParams.get('patch') === '1' });
+    return json(res, 200, { ...info, status: info.status === 'missing' ? 'missing' : row.status, error: row.error || null });
+  }
+
+  const runApplyMatch = /^\/runs\/([^/]+)\/apply$/.exec(route);
+  if (runApplyMatch && method === 'POST') {
+    const row = worktreeByRun(runApplyMatch[1]);
+    if (!row) throw fail('No worktree is recorded for this run.', 404);
+    if (runs.has(row.conversation_id)) throw fail('Wait for the run to finish before applying its changes.', 409);
+    const result = await applyWorktree(worktreeRecord(row), worktreeRootFor(row));
+    if (result.status === 'conflict') {
+      store.db.prepare("UPDATE worktrees SET status='conflict',error=?,updated=? WHERE id=?").run(result.error || 'The changes no longer apply cleanly.', Date.now(), row.id);
+      emitTyped(row.conversation_id, row.run_id, 'git.diff.updated', { worktreeId: row.id, files: result.files });
+      return json(res, 200, { status: 'conflict', error: result.error, files: result.files });
+    }
+    store.db.prepare("UPDATE worktrees SET status='applied',error=NULL,updated=? WHERE id=?").run(Date.now(), row.id);
+    emitTyped(row.conversation_id, row.run_id, 'git.diff.updated', { worktreeId: row.id, files: result.files });
+    return json(res, 200, { status: 'applied', files: result.files, additions: result.additions, deletions: result.deletions });
+  }
+
+  const runDiscardMatch = /^\/runs\/([^/]+)\/discard$/.exec(route);
+  if (runDiscardMatch && method === 'POST') {
+    const row = worktreeByRun(runDiscardMatch[1]);
+    if (!row) throw fail('No worktree is recorded for this run.', 404);
+    if (runs.has(row.conversation_id)) throw fail('Wait for the run to finish before discarding its changes.', 409);
+    await discardWorktree(worktreeRecord(row), worktreeRootFor(row));
+    store.db.prepare("UPDATE worktrees SET status='discarded',error=NULL,updated=? WHERE id=?").run(Date.now(), row.id);
+    emitTyped(row.conversation_id, row.run_id, 'git.diff.updated', { worktreeId: row.id, files: [] });
+    return json(res, 200, { status: 'discarded' });
+  }
+
+  /* ---- AGENTS.md (PLAN §1.10) ---- */
+
+  if (route === '/agents-md' && method === 'GET') {
+    const projectId = url.searchParams.get('projectId');
+    const target = url.searchParams.get('path') || null;
+    const files = await collectAgents(projectId && projectId !== 'general' ? projectId : null, target);
+    return json(res, 200, {
+      files,
+      global: files.find((file) => file.scope === 'global')?.content || '',
+      project: files.find((file) => file.scope === 'project')?.content || '',
+    });
+  }
+  if (route === '/agents-md' && method === 'POST') {
+    const b = await body(req);
+    const content = typeof b.content === 'string' ? b.content : '';
+    if (content.length > 256000) throw fail('AGENTS.md must be at most 256,000 characters.');
+    let file;
+    if (b.scope === 'global') {
+      file = GLOBAL_AGENTS;
+    } else {
+      const p = project(b.projectId);
+      const root = canonical(p.directory);
+      const requested = String(b.path || AGENTS_FILENAME);
+      file = path.resolve(root, requested);
+      if (file !== path.join(root, AGENTS_FILENAME) && !file.startsWith(`${root}${path.sep}`)) throw fail('That file is outside the project.', 400);
+      if (path.basename(file) !== AGENTS_FILENAME) throw fail('Only AGENTS.md files can be edited.');
+    }
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const temp = `${file}.${uid()}.tmp`;
+    await writeFile(temp, content, { mode: 0o600 });
+    await rename(temp, file);
+    store.event('agents.changed', null, { path: file, scope: b.scope === 'global' ? 'global' : 'project' }, { kind: 'agents.changed' });
+    return json(res, 200, { saved: true, path: file, scope: b.scope === 'global' ? 'global' : 'project' });
+  }
+
+  /* ---- Usage limits and pacing (PLAN §30–§32) ---- */
+
+  if (route === '/usage/limits' && method === 'GET') return json(res, 200, { limits: listLimits(store) });
+  if (route === '/usage/limits' && method === 'POST') {
+    const b = await body(req);
+    if (b.delete && b.id) return json(res, 200, removeLimit(store, String(b.id)));
+    const limit = upsertLimit(store, b);
+    store.event('usage.limits.changed', null, { limitId: limit.id }, { kind: 'usage.limits.changed' });
+    return json(res, 201, { limit });
+  }
+  if (route === '/usage/pacing' && method === 'GET') return json(res, 200, { pacing: pacing(store), generatedAt: Date.now() });
+  const usageLimitMatch = /^\/usage\/limits\/([^/]+)$/.exec(route);
+  if (usageLimitMatch && method === 'DELETE') {
+    const result = removeLimit(store, usageLimitMatch[1]);
+    store.event('usage.limits.changed', null, { limitId: usageLimitMatch[1] }, { kind: 'usage.limits.changed' });
+    return json(res, 200, result);
+  }
+
+  /* ---- Notifications (PLAN §33) ---- */
+
+  if (route === '/notifications' && method === 'GET') {
+    return json(res, 200, listNotifications(store, { unreadOnly: url.searchParams.get('unread') === 'true', limit: Number(url.searchParams.get('limit')) || 100 }));
+  }
+  const notificationReadMatch = /^\/notifications\/([^/]+)\/read$/.exec(route);
+  if (notificationReadMatch && method === 'POST') {
+    return json(res, 200, { notification: markNotificationRead(store, notificationReadMatch[1]) });
+  }
+  const notificationMatch = /^\/notifications\/([^/]+)$/.exec(route);
+  if (notificationMatch && method === 'PATCH') {
+    return json(res, 200, { notification: markNotificationRead(store, notificationMatch[1]) });
+  }
+  if (route === '/notifications/read-all' && method === 'POST') {
+    const b = await body(req).catch(() => ({}));
+    return json(res, 200, markAllNotificationsRead(store, b?.conversationId || null));
   }
 
   if (route === '/clips' && method === 'GET') {
@@ -1214,13 +1738,13 @@ async function routes(req, res) {
   if (route === '/processes' && method === 'GET') return json(res, 200, { processes: await listProcesses() });
   const killMatch = /^\/processes\/([^/]+)\/kill$/.exec(route);
   if (killMatch && method === 'POST') return killProcess(req, res, Number(killMatch[1]));
-  if (route === '/assistant' && method === 'POST') return assistant(req, res);
 
   throw fail('Not found.', 404);
 }
 
 importProjects();
 importLegacy();
+syncLegacySessions(true);
 store.recover();
 await seedCatalog();
 await importClips();
@@ -1235,10 +1759,22 @@ const server = createServer((req, res) => {
 });
 server.requestTimeout = 30000;
 server.headersTimeout = 10000;
-server.listen(Number(process.env.WORKBENCH_CONTROL_PORT || 8788), '127.0.0.1', () => console.log(JSON.stringify({ event: 'control_ready', port: Number(process.env.WORKBENCH_CONTROL_PORT || 8788), maxRuns: MAX_RUNS })));
+server.listen(Number(process.env.WORKBENCH_CONTROL_PORT || 8788), '127.0.0.1', () => console.log(JSON.stringify({ event: 'control_ready', port: Number(process.env.WORKBENCH_CONTROL_PORT || 8788), maxRuns: maxRuns() })));
 
 const scheduler = setInterval(() => void tick(), 2000);
 scheduler.unref();
+/* Lease heartbeat: while this process lives, its runs are provably alive. On
+   restart the next control process sees stale live runs and marks them
+   interrupted_by_restart (store.recover). */
+const heartbeat = setInterval(() => {
+  for (const run of runs.values()) {
+    run.heartbeat = Date.now();
+    store.heartbeat(run.command.id);
+  }
+}, 10000);
+heartbeat.unref();
+const legacySync = setInterval(() => syncLegacySessions(true), 30_000);
+legacySync.unref();
 sampleSystem();
 const systemSampler = setInterval(sampleSystem, SYSTEM_SAMPLE_MS);
 systemSampler.unref();
@@ -1250,15 +1786,27 @@ prune.unref();
 void refreshCatalog().catch((error) => console.warn(error.message));
 
 async function shutdown() {
+  if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(scheduler);
   clearInterval(systemSampler);
+  clearInterval(heartbeat);
+  /* Graceful drain: give active workers a moment to finish instead of
+     interrupting them the instant the process is asked to stop. Waiting runs
+     (question/permission) cannot drain and are interrupted after the grace. */
+  const graceMs = Math.max(0, Number(process.env.WORKBENCH_SHUTDOWN_GRACE_MS || 45_000));
+  if (runs.size > 0 && graceMs > 0) {
+    console.log(JSON.stringify({ event: 'shutdown_draining', runs: runs.size, graceMs }));
+    const deadline = Date.now() + graceMs;
+    while (runs.size > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   for (const run of runs.values()) {
     run.cancelled = true;
     store.status(run.command.id, 'interrupted', 'Runner service stopped.');
   }
   oc.close();
   pi.close();
+  mailer.stop();
   server.close();
   for (const listener of store.listeners) store.listeners.delete(listener);
   setTimeout(() => { store.close(); legacy?.close(); process.exit(0); }, 1500).unref();

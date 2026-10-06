@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconExternalLink, IconRefresh } from '@tabler/icons-react';
+import { IconExternalLink, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { ModelPicker } from '@/components/whirl/model-picker';
-import { connections, mutate, offerings, usageReport } from '@/lib/workbench';
+import { connections, deleteUsageLimit, mutate, offerings, saveUsageLimit, usageLimits, usagePacing, usageReport } from '@/lib/workbench';
 import { formatTokens } from '@/lib/format';
-import type { Connection, Engine, Project, UsageBreakdown } from '@/lib/types';
+import type { Connection, Engine, PacingMetric, Project, UsageBreakdown, UsageLimit, UsagePacing } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const money = (value: number | null | undefined) => value == null ? 'Unknown' : `$${value.toFixed(value >= 1 ? 2 : 4)}`;
@@ -81,6 +81,8 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
           ))}
         </div>
         {Boolean(totals?.unknownCost) && <p className="mt-2 text-[11px] text-muted-foreground">{totals!.unknownCost} requests have unknown cost (subscription plans or missing provider pricing).</p>}
+
+        <LimitsPacing onToast={onToast} />
 
         {daily.length > 1 && (
           <div className="mt-6 rounded-2xl bg-well p-4">
@@ -192,5 +194,201 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
         <p className="mt-5 pb-8 text-xs leading-5 text-muted-foreground">{usage.data?.coverage} Context occupancy is shown inside each conversation and is separate from these cumulative token totals.</p>
       </div>
     </div>
+  );
+}
+
+/* ---- Limits, budgets and pacing (§30–32) ---- */
+
+const SOURCE_TONE: Record<string, string> = {
+  reported: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  estimated: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  manual: 'bg-muted text-muted-foreground',
+};
+
+function sourceBadge(source?: string) {
+  const key = source || 'estimated';
+  return <span className={cn('rounded-full px-1.5 py-0.5 text-[10px] font-medium capitalize', SOURCE_TONE[key] || SOURCE_TONE.estimated)}>{key}</span>;
+}
+
+function paceText(metric: PacingMetric): string | null {
+  if (metric.pacePercent != null) {
+    const diff = Math.round(metric.pacePercent);
+    if (Math.abs(diff) < 1) return 'on pace';
+    return diff > 0 ? `${diff}% ahead of pace` : `${Math.abs(diff)}% behind pace`;
+  }
+  if (metric.limit && metric.expected != null && metric.used != null) {
+    const diff = Math.round(((metric.used - metric.expected) / metric.limit) * 100);
+    if (Math.abs(diff) < 1) return 'on pace';
+    return diff > 0 ? `${diff}% ahead of pace` : `${Math.abs(diff)}% behind pace`;
+  }
+  return null;
+}
+
+function PacingCard({ label, metric, source }: { label: string; metric: PacingMetric; source?: string }) {
+  const limit = metric.limit ?? null;
+  const used = Number(metric.used || 0);
+  const percent = metric.percent ?? (limit ? (used / limit) * 100 : 0);
+  const expectedPercent = limit && metric.expected != null ? (metric.expected / limit) * 100 : null;
+  const pace = paceText(metric);
+  const format = (value: number) => label === 'Cost' ? money(value) : label === 'Requests' ? String(value) : formatTokens(value);
+  return (
+    <div className="rounded-2xl bg-well p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground">{label}</p>
+        {sourceBadge(source)}
+      </div>
+      <p className="mt-1 text-lg font-semibold tabular-nums">
+        {format(used)}
+        {limit != null && <span className="text-xs font-normal text-muted-foreground"> / {format(limit)}</span>}
+      </p>
+      {limit != null && (
+        <div className="relative mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn('h-full rounded-full', percent >= 100 ? 'bg-destructive' : percent >= 80 ? 'bg-amber-500' : 'bg-foreground')}
+            style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+          />
+          {expectedPercent != null && (
+            <span
+              className="absolute top-1/2 h-3 w-px -translate-y-1/2 bg-foreground/60"
+              style={{ left: `${Math.min(100, Math.max(0, expectedPercent))}%` }}
+              title="Expected by now"
+            />
+          )}
+        </div>
+      )}
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        {limit == null ? 'No limit set' : `${Math.round(percent)}% used${pace ? ` · ${pace}` : ''}`}
+      </p>
+    </div>
+  );
+}
+
+function LimitsPacing({ onToast }: { onToast: (message: string, isError?: boolean) => void }) {
+  const client = useQueryClient();
+  const limitsQuery = useQuery({ queryKey: ['usage-limits'], queryFn: usageLimits, staleTime: 30_000, retry: 1 });
+  const pacingQuery = useQuery({ queryKey: ['usage-pacing'], queryFn: usagePacing, staleTime: 30_000, retry: 1 });
+  const [period, setPeriod] = useState<'weekly' | 'monthly'>('weekly');
+  const [metric, setMetric] = useState<'tokens' | 'cost' | 'requests'>('tokens');
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const limits = limitsQuery.data?.limits || limitsQuery.data?.usageLimits || [];
+  const pacing: UsagePacing | undefined = pacingQuery.data?.pacing || pacingQuery.data;
+  const endpointMissing = limitsQuery.isFetched && limitsQuery.data === undefined;
+
+  async function refresh() {
+    await client.invalidateQueries({ queryKey: ['usage-limits'] });
+    await client.invalidateQueries({ queryKey: ['usage-pacing'] });
+  }
+
+  async function save() {
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || amount <= 0) { onToast('Enter a positive budget.', true); return; }
+    setBusy(true);
+    try {
+      const body: Partial<UsageLimit> = { scope: 'global', period, source: 'manual', manual: true };
+      if (metric === 'tokens') body.limitTokens = Math.round(amount);
+      if (metric === 'cost') body.limitCost = amount;
+      if (metric === 'requests') body.limitRequests = Math.round(amount);
+      await saveUsageLimit(body);
+      setValue('');
+      await refresh();
+      onToast('Budget saved.');
+    } catch (error) { onToast((error as Error).message, true); } finally { setBusy(false); }
+  }
+
+  async function remove(id?: string) {
+    if (!id) return;
+    try {
+      await deleteUsageLimit(id);
+      await refresh();
+      onToast('Budget removed.');
+    } catch (error) { onToast((error as Error).message, true); }
+  }
+
+  const metrics = pacing
+    ? ([['Tokens', pacing.tokens], ['Cost', pacing.cost], ['Requests', pacing.requests]] as const)
+      .filter(([, item]) => item && (item.limit != null || item.used != null))
+    : [];
+
+  return (
+    <section className="mt-8">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold">Limits &amp; pacing</h2>
+        {pacing?.resetAt && <span className="text-[11px] text-muted-foreground">Resets {new Date(pacing.resetAt).toLocaleDateString()}</span>}
+      </div>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        Budgets are labelled by source: <b>reported</b> from the provider, <b>estimated</b> from recorded usage, <b>manual</b> set by you. Pacing compares usage against a straight line to the reset.
+      </p>
+
+      {pacingQuery.isError && <p role="alert" className="mt-3 text-xs text-destructive">{pacingQuery.error.message}</p>}
+
+      {metrics.length > 0 && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          {metrics.map(([label, item]) => <PacingCard key={label} label={label} metric={item as PacingMetric} source={pacing?.source} />)}
+        </div>
+      )}
+
+      <div className="mt-3 space-y-2">
+        {limits.map((limit) => (
+          <div key={limit.id || `${limit.scope}:${limit.provider || ''}:${limit.period}`} className="flex flex-wrap items-center gap-2 rounded-xl bg-well p-3 text-xs">
+            <span className="font-medium">{limit.provider || (limit.scope === 'global' ? 'All providers' : limit.scope)}</span>
+            <span className="text-muted-foreground capitalize">{limit.period}</span>
+            <span className="tabular-nums">
+              {limit.limitTokens ? `${formatTokens(limit.limitTokens)} tokens` : ''}
+              {limit.limitCost ? `${money(limit.limitCost)}${limit.currency ? ` ${limit.currency}` : ''}` : ''}
+              {limit.limitRequests ? `${limit.limitRequests} requests` : ''}
+            </span>
+            {sourceBadge(limit.source || (limit.manual ? 'manual' : undefined))}
+            {limit.resetAt && <span className="text-muted-foreground">resets {new Date(limit.resetAt).toLocaleDateString()}</span>}
+            {limit.id && (
+              <button
+                type="button"
+                aria-label="Remove budget"
+                onClick={() => void remove(limit.id)}
+                className="ml-auto grid size-6 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              >
+                <IconTrash size={13} />
+              </button>
+            )}
+          </div>
+        ))}
+        {limitsQuery.isPending && <p className="text-xs text-muted-foreground">Loading budgets…</p>}
+        {limitsQuery.isFetched && limits.length === 0 && !endpointMissing && (
+          <p className="text-xs text-muted-foreground">No budgets set. Add a manual weekly or monthly budget below.</p>
+        )}
+        {endpointMissing && (
+          <p className="text-xs text-muted-foreground">This control plane does not expose usage limits yet — only recorded usage is shown.</p>
+        )}
+      </div>
+
+      {!endpointMissing && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl bg-well p-4">
+          <span className="text-xs font-medium">Set a manual budget</span>
+          <select aria-label="Budget period" className="rounded-lg bg-background p-2 text-xs" value={period} onChange={(event) => setPeriod(event.target.value as 'weekly' | 'monthly')}>
+            <option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+          </select>
+          <select aria-label="Budget metric" className="rounded-lg bg-background p-2 text-xs" value={metric} onChange={(event) => setMetric(event.target.value as 'tokens' | 'cost' | 'requests')}>
+            <option value="tokens">Tokens</option><option value="cost">Cost (USD)</option><option value="requests">Requests</option>
+          </select>
+          <input
+            aria-label="Budget amount"
+            inputMode="decimal"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder={metric === 'cost' ? '20' : '1000000'}
+            className="w-28 rounded-lg bg-background p-2 text-xs"
+          />
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void save()}
+            className="cursor-pointer rounded-full bg-primary px-3 py-2 text-xs text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96] disabled:opacity-40"
+          >
+            {busy ? 'Saving…' : 'Save budget'}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }

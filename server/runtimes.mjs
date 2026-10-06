@@ -10,8 +10,61 @@ const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k
 
 export const CAPABILITIES = {
   opencode: { images: true, files: true, questions: true, permissions: true, usage: true, fork: true, modes: true, plan: true },
-  pi: { images: true, files: true, questions: false, permissions: false, usage: true, fork: true, modes: true, plan: true },
+  pi: { images: true, files: true, questions: true, permissions: true, usage: true, fork: true, modes: true, plan: true },
 };
+
+function dispatchPiEvent(event, hooks) {
+  switch (event.kind) {
+    case 'tool.started':
+    case 'tool.completed':
+    case 'tool.progress':
+    case 'command.started':
+    case 'command.completed':
+    case 'file.read':
+    case 'test.completed':
+      hooks.tool?.(event);
+      break;
+    case 'text.delta':
+      /* Preserve messageId by emitting through control's generic typed-event
+         hook (its dedicated `text` hook only carries the delta). */
+      if (typeof hooks.textDelta === 'function') hooks.textDelta(event);
+      else if (typeof hooks.tool === 'function') hooks.tool(event);
+      else if (typeof hooks.text === 'function') hooks.text(event.delta);
+      break;
+    case 'file.changed':
+      hooks.fileChanged?.(event);
+      hooks.tool?.(event);
+      break;
+    case 'git.diff.updated':
+      hooks.diff?.(event);
+      break;
+    case 'todo.updated':
+      hooks.todo?.(event);
+      break;
+    case 'usage.updated':
+      hooks.usage?.(event);
+      break;
+    case 'question.required':
+      hooks.interaction?.(event.interactionId, 'question', { questions: event.questions });
+      hooks.question?.(event);
+      break;
+    case 'permission.required':
+      hooks.interaction?.(event.interactionId, 'permission', { permission: event.action, patterns: [event.detail].filter(Boolean) });
+      hooks.permission?.(event);
+      break;
+    case 'interaction.closed':
+      hooks.interactionClosed?.(event.interactionId);
+      break;
+    case 'run.state':
+      hooks.state?.(event);
+      break;
+    case 'attention.changed':
+      hooks.attention?.(event);
+      break;
+    default:
+      break;
+  }
+}
 
 export class OpenCodeRuntime {
   constructor({ dataDir, onEvent }) {
@@ -359,10 +412,12 @@ export class PiRuntime {
         else resolve();
       };
       child.once('error', (error) => finish(error));
-      child.once('exit', (code, signal) => finish(new Error(`Pi runner exited (${signal || code}).`)));
+      child.once('exit', (code, signal) => finish(code === 0 && !signal ? null : new Error(`Pi runner exited (${signal || code}).`)));
       child.on('message', (event) => {
         if (event.type === 'binding') hooks.binding(event.nativeId);
         else if (event.type === 'message') hooks.message(event.message);
+        else if (event.type === 'activity') hooks.activity?.(event.activity);
+        else if (event.type === 'event') dispatchPiEvent(event.event, hooks);
         else if (event.type === 'done') finish(event.error ? new Error(event.error) : null);
       });
       hooks.running();
@@ -374,11 +429,28 @@ export class PiRuntime {
         model: command.model,
         reasoning: command.reasoning,
         mode: conversation.mode,
+        permission: command.permission,
         text: decode(command.input, {}).text,
         attachments,
         dataDir: this.dataDir,
       });
     });
+  }
+
+  async respond(conversation, interaction, body) {
+    const child = this.runs.get(conversation.id);
+    if (!child || !child.connected) return;
+    child.send({ type: 'response', interactionId: interaction.id, reply: body.reply, answers: body.answers, reject: !!body.reject });
+  }
+
+  /* Codex-style steer: inject a user message into the running agent so the
+     current Run adapts at its next step. Returns false when no worker owns
+     this conversation (the caller then falls back to the durable queue). */
+  async steer(conversationId, text) {
+    const child = this.runs.get(conversationId);
+    if (!child || !child.connected) return false;
+    child.send({ type: 'steer', text: String(text || '') });
+    return true;
   }
 
   async stop(conversationId) {

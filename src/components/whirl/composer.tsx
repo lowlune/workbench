@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   IconArrowUp,
+  IconArrowUpRight,
   IconClipboard,
   IconLoader2,
   IconPaperclip,
@@ -32,6 +33,8 @@ export function Composer({
   floating = false,
   focusSignal = 0,
   onToast,
+  onSteer,
+  meta,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -50,6 +53,10 @@ export function Composer({
   /** Bump to focus the textarea — "New task" lands the caret here. */
   focusSignal?: number;
   onToast: (message: string, isError?: boolean) => void;
+  /** Send the draft into the running agent now (Codex-style steer). */
+  onSteer?: () => void;
+  /** Model selector + context usage, rendered inside the capsule. */
+  meta?: ReactNode;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -136,10 +143,6 @@ export function Composer({
   }
 
   const canSend = !disabled && !sendBlocked && !sending && !processing && Boolean(draft.trim() || attachments.length);
-  /* Whirl's rule: an empty composer while the agent writes offers Stop; the
-     first typed character hands the pill back to Send. Follow-ups sent mid-run
-     are allowed — the server queues them and runs them after this task. */
-  const showStop = isGenerating && Boolean(onStop) && !draft.trim() && attachments.length === 0;
 
   function submit() {
     if (sendBlocked) {
@@ -233,10 +236,22 @@ export function Composer({
               <MenuItem icon={<IconClipboard size={15} />} label="Paste from clipboard" onClick={() => void pasteFromClipboard()} />
             </PopoverContent>
           </Popover>
+          {meta && <div className="ml-0.5 flex min-w-0 items-center gap-1.5">{meta}</div>}
         </div>
         <div className="absolute right-2 bottom-2 flex items-center gap-1.5">
           {processing && <IconLoader2 size={15} className="animate-spin text-muted-foreground" />}
-          {showStop ? (
+          {isGenerating && onSteer && Boolean(draft.trim() || attachments.length) && (
+            <button
+              type="button"
+              onClick={onSteer}
+              title="Send into the running agent now — it adapts at its next step"
+              className="inline-flex h-9 cursor-pointer items-center gap-1 rounded-full bg-well px-3 text-[12px] font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.96]"
+            >
+              <IconArrowUpRight size={13} stroke={2.2} />
+              Steer
+            </button>
+          )}
+          {isGenerating && onStop && (
             <button
               type="button"
               onClick={onStop}
@@ -245,7 +260,8 @@ export function Composer({
             >
               <IconPlayerStopFilled size={15} />
             </button>
-          ) : (
+          )}
+          {(!isGenerating || canSend) && (
             <button
               type="submit"
               disabled={!canSend}

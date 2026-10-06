@@ -19,7 +19,7 @@ export function ChatRow({
   onMenuAt?: (x: number, y: number, session: Session) => void;
 }) {
   return (
-    <div className="group/row relative">
+    <div className="group/row relative" data-session-row={session.id}>
       <button
         type="button"
         onClick={() => onOpen(session)}

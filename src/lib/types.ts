@@ -25,13 +25,39 @@ export interface Agent {
   updated?: number | null;
 }
 
+export type RunState =
+  | 'queued' | 'starting' | 'running' | 'waiting' | 'waiting_for_user'
+  | 'waiting_for_permission' | 'stopping' | 'interrupting'
+  | 'interrupted' | 'completed' | 'succeeded' | 'failed' | 'cancelled'
+  | 'uncertain' | 'interrupted_by_restart' | string;
+
+export type Attention = 'none' | 'waiting' | 'permission';
+
+export interface Todo {
+  id: string;
+  text: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled' | string;
+}
+
+export interface RunUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: number | null;
+}
+
 export interface ActiveRun {
   id: string;
-  status: string;
+  status: RunState;
   error?: string | null;
   model: string;
   started?: number | null;
   ended?: number | null;
+  usage?: RunUsage | null;
+  todos?: Todo[];
+  etaLow?: number | null;
+  etaHigh?: number | null;
 }
 
 export interface Interaction {
@@ -72,6 +98,9 @@ export interface Session {
   paused?: boolean;
   legacy?: boolean;
   activeRun?: ActiveRun | null;
+  runStatus?: RunState;
+  attention?: Attention;
+  todos?: Todo[];
   queued?: { id: string; text: string; model: string; attachments?: { id: string; name: string; mime: string }[] }[];
   interactions?: Interaction[];
   capabilities?: Record<string, boolean>;
@@ -281,4 +310,64 @@ export interface UsageResponse {
 
 export interface ApiErrorPayload {
   error?: string;
+}
+
+/* ---- Usage limits, pacing and notifications (§30–33) ---- */
+
+export type UsageSource = 'reported' | 'estimated' | 'manual';
+
+export interface UsageLimit {
+  id?: string;
+  scope: 'provider' | 'global' | string;
+  provider?: string | null;
+  period: 'weekly' | 'monthly' | string;
+  limitTokens?: number | null;
+  limitCost?: number | null;
+  limitRequests?: number | null;
+  currency?: string | null;
+  resetAt?: number | null;
+  source?: UsageSource | string;
+  manual?: boolean;
+}
+
+export interface PacingMetric {
+  limit?: number | null;
+  used?: number;
+  expected?: number;
+  percent?: number;
+  pacePercent?: number;
+}
+
+export interface UsagePacing {
+  period?: string;
+  source?: UsageSource | string;
+  resetAt?: number | null;
+  currency?: string | null;
+  tokens?: PacingMetric;
+  cost?: PacingMetric;
+  requests?: PacingMetric;
+}
+
+export interface NotificationItem {
+  id: string;
+  kind?: string;
+  severity?: 'info' | 'warning' | 'error' | string;
+  conversationId?: string | null;
+  runId?: string | null;
+  title: string;
+  body?: string | null;
+  read?: boolean;
+  created?: number;
+  delivered?: boolean;
+}
+
+/* One normalised multiplexed event from `/api/v2/events` (§4). Payloads are
+   intentionally loose: the control plane adds fields over time and the UI
+   reads only what it understands. */
+export interface WorkbenchEvent {
+  seq: number;
+  type: string;
+  conversationId?: string | null;
+  runId?: string | null;
+  [key: string]: unknown;
 }

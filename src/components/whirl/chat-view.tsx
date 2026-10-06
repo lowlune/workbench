@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { IconAlertTriangleFilled, IconArrowLeft, IconSparkles, IconX } from '@tabler/icons-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { IconAlertTriangleFilled, IconArrowLeft, IconBook, IconX } from '@tabler/icons-react';
 import { Composer } from '@/components/whirl/composer';
+import { ConversationNav } from '@/components/whirl/conversation-nav';
+import { FileViewer, type FileRef } from '@/components/whirl/file-viewer';
 import { InteractionCard } from '@/components/whirl/interaction-card';
 import { ModelMenu } from '@/components/whirl/model-menu';
+import { RunSummary } from '@/components/whirl/run-summary';
+import { ConveyorLoop } from '@/components/loading-ui/conveyor-loop';
 import { ThreadView } from '@/components/whirl/thread/thread-view';
 import { getOlderMessages } from '@/lib/api';
 import type { Attachment } from '@/lib/attachments';
-import { messageContext, statusLabel } from '@/lib/format';
+import { formatTokens, messageContext } from '@/lib/format';
 import type { Agent, QueuedMessage, Session } from '@/lib/types';
 import { cn, humanBytes } from '@/lib/utils';
-import { mutate } from '@/lib/workbench';
+import { conversationPrompts, steerConversation, ACTIVE_RUN_STATES, mutate } from '@/lib/workbench';
 
 interface ChatViewProps {
   session?: Session;
@@ -37,6 +41,24 @@ interface ChatViewProps {
   onNewTask: () => void;
   onToast: (message: string, isError?: boolean) => void;
   onReplaceSession: (session: Session, mode: 'merge' | 'prepend') => void;
+  /* Optional Fáza 2 hooks (§12/§29); the frozen call site keeps working. */
+  onViewChanges?: (runId: string, active: boolean) => void;
+  onOpenAgentsMd?: () => void;
+  agentsMdActive?: boolean;
+}
+
+/* True while any dialog, dropdown, listbox or popover is on screen, so ESC
+   closes that surface first instead of interrupting the Run (§15). Closed
+   keep-mounted popups have no client rects and are ignored. */
+function overlayOpen() {
+  const nodes = document.querySelectorAll<HTMLElement>(
+    '[data-slot="dialog-content"],[role="dialog"],[role="menu"],[data-slot="popover-content"],[role="listbox"]',
+  );
+  for (const node of nodes) {
+    if (node.hasAttribute('hidden') || node.getAttribute('aria-hidden') === 'true') continue;
+    if (node.getClientRects().length > 0) return true;
+  }
+  return false;
 }
 
 /* The chat face, Whirl-shaped: a bare transcript under floating status
@@ -56,7 +78,6 @@ export function ChatView({
   memoryFree,
   selectedModel,
   onSelectModel,
-  onAsk,
   onDraftChange,
   onAttachmentsChange,
   onSend,
@@ -66,13 +87,19 @@ export function ChatView({
   onNewTask,
   onToast,
   onReplaceSession,
+  onViewChanges,
+  onOpenAgentsMd,
+  agentsMdActive,
 }: ChatViewProps) {
   const queryClient = useQueryClient();
+  const sectionRef = useRef<HTMLElement>(null);
   const columnRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const loadingOlderRef = useRef(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [viewerFile, setViewerFile] = useState<FileRef | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   /* A growing composer pushes the transcript up: publish its height as
      --dock-clearance, which the transcript's bottom padding reads. */
@@ -95,8 +122,25 @@ export function ChatView({
     return () => observer.disconnect();
   }, []);
 
-  const loadOlder = useCallback(async () => {
-    const first = session?.messages?.[0];
+  /* The composer is a floating overlay over the transcript; a wheel event on
+     it has no scrollable ancestor, so forward it to the message viewport.
+     Textareas that can scroll themselves keep their own wheel handling. */
+  useEffect(() => {
+    const dock = dockRef.current;
+    const viewport = viewportRef.current;
+    if (!dock || !viewport) return;
+    const onWheel = (event: WheelEvent) => {
+      const target = event.target as HTMLElement | null;
+      const textarea = target?.closest('textarea');
+      if (textarea && textarea.scrollHeight > textarea.clientHeight + 1) return;
+      viewport.scrollTop += event.deltaY;
+      event.preventDefault();
+    };
+    dock.addEventListener('wheel', onWheel, { passive: false });
+    return () => dock.removeEventListener('wheel', onWheel);
+  }, []);
+
+  const loadOlder = useCallback(async () => {    const first = session?.messages?.[0];
     if (!sessionId || !first || loadingOlderRef.current || !session?.hasMoreMessages) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
@@ -122,10 +166,84 @@ export function ChatView({
   const resumeMemoryBlocked = !hasLivePane && Boolean(session?.canResume) && !resumeMemoryAvailable;
   const paused = Boolean(session?.paused);
   const canContinue = hasLivePane || Boolean(session?.canResume) || paused;
-  const status = hasLivePane ? statusLabel(agent?.status) : resumeRunning ? 'Thinking' : session?.canResume || paused ? statusLabel('idle') : 'Saved history';
   const isWorking = hasLivePane ? agent?.status === 'working' : resumeRunning;
   const messages = session?.messages;
   const interactions = session?.interactions || [];
+  const promptsQuery = useQuery({
+    queryKey: ['prompts', sessionId],
+    queryFn: () => conversationPrompts(sessionId!),
+    enabled: Boolean(sessionId),
+    staleTime: 30_000,
+  });
+  const currentModel = selectedModel || session?.modelPref || undefined;
+
+  const jumpToMessage = useCallback((messageId: string) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const target = viewport.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`);
+    if (target) {
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return;
+    }
+    const fullPrompts = promptsQuery.data?.prompts;
+    const fallback = (session?.messages || []).filter((message) => message.info.role === 'user').map((message) => ({ id: message.id }));
+    const list = fullPrompts?.length ? fullPrompts : fallback;
+    const index = list.findIndex((prompt) => prompt.id === messageId);
+    if (index >= 0 && list.length > 1) {
+      viewport.scrollTo({ top: (index / (list.length - 1)) * (viewport.scrollHeight - viewport.clientHeight), behavior: 'smooth' });
+    }
+  }, [session?.messages, promptsQuery.data?.prompts]);
+
+  const openFile = useCallback((file: FileRef) => {
+    setViewerFile({ ...file, projectId: file.projectId || session?.projectId || undefined });
+    setViewerOpen(true);
+  }, [session?.projectId]);
+
+
+  const stopRun = useCallback(() => {
+    if (sessionId) onStopSession(sessionId);
+    else if (agent) onStop(agent);
+  }, [sessionId, agent, onStopSession, onStop]);
+
+  const steer = useCallback(async () => {
+    const id = sessionId || session?.id;
+    const text = draft.trim();
+    if (!id || !text) return;
+    try {
+      const result = await steerConversation(id, { text, model: currentModel });
+      onDraftChange('');
+      onAttachmentsChange([]);
+      await queryClient.invalidateQueries({ queryKey: ['session', id] });
+      onToast(result.steered ? 'Sent into the running agent.' : 'Queued — no live worker to steer.');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Could not steer the run.', true);
+    }
+  }, [sessionId, session?.id, draft, currentModel, onDraftChange, onAttachmentsChange, queryClient, onToast]);
+
+  /* ESC interrupts the active Run only when no other surface owns the key and
+     the chat itself holds focus (§15). The callback rides a ref so the
+     listener never goes stale and never forces a re-render. */
+  const activeRun = session?.activeRun;
+  const runActive = Boolean(activeRun && ACTIVE_RUN_STATES.has(String(activeRun.status || '')));
+  const interruptRef = useRef<(() => void) | null>(null);
+  interruptRef.current = runActive || resumeRunning ? stopRun : null;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      const stop = interruptRef.current;
+      if (!stop) return;
+      if (overlayOpen()) return;
+      const focused = document.activeElement as HTMLElement | null;
+      const section = sectionRef.current;
+      const inside = !focused || focused === document.body || focused === document.documentElement || (section ? section.contains(focused) : false);
+      if (!inside) return;
+      event.preventDefault();
+      stop();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   async function resumeSession() {
     const id = sessionId || session?.id;
@@ -137,6 +255,8 @@ export function ChatView({
       onToast(error instanceof Error ? error.message : 'Could not resume this conversation.', true);
     }
   }
+
+  const queuedIds = useMemo(() => new Set(queued.map((item) => item.id)), [queued]);
 
   const context = useMemo(() => {
     const list = messages || [];
@@ -150,7 +270,7 @@ export function ChatView({
   }, [messages, session?.model]);
 
   return (
-    <section className="relative flex h-full min-h-0 flex-col" aria-label="Conversation">
+    <section ref={sectionRef} className="relative flex h-full min-h-0 flex-col" aria-label="Conversation">
       {/* Floating chrome: back on phones, status and actions on the right. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:px-6">
         <button
@@ -162,61 +282,16 @@ export function ChatView({
           <IconArrowLeft size={16} />
         </button>
         <div className="pointer-events-auto ml-auto flex min-w-0 items-center gap-1.5">
-          <ModelMenu
-            model={selectedModel || session?.modelPref || context.model}
-            context={context}
-            directory={session?.directory}
-            tags={session?.tags}
-            liveAgent={hasLivePane}
-            onSelect={onSelectModel}
-          />
-          {onAsk && (
+          {onOpenAgentsMd && agentsMdActive && (
             <button
               type="button"
-              onClick={onAsk}
+              onClick={onOpenAgentsMd}
+              title="AGENTS.md instructions are active in this project"
+              aria-label="Open AGENTS.md instructions"
               className="raised inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border transition-colors duration-150 hover:bg-accent"
             >
-              <IconSparkles size={14} />
-              <span className="hidden sm:inline">Ask</span>
-            </button>
-          )}
-          <span className={cn(
-            'raised inline-flex h-8 items-center gap-1.5 rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border',
-            needsAttention && 'text-destructive',
-          )}>
-            <span aria-hidden="true" className={cn(
-              'size-1.5 rounded-full',
-              isWorking ? 'animate-pulse bg-foreground'
-                : needsAttention ? 'bg-destructive'
-                  : 'bg-muted-foreground/60',
-            )} />
-            {status}
-          </span>
-          {hasLivePane && agent?.status === 'working' && (
-            <button
-              type="button"
-              onClick={() => onStop(agent)}
-              className="raised inline-flex h-8 cursor-pointer items-center rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border transition-colors duration-150 hover:bg-destructive/10 hover:text-destructive"
-            >
-              Stop
-            </button>
-          )}
-          {resumeRunning && sessionId && (
-            <button
-              type="button"
-              onClick={() => onStopSession(sessionId)}
-              className="raised inline-flex h-8 cursor-pointer items-center rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border transition-colors duration-150 hover:bg-destructive/10 hover:text-destructive"
-            >
-              Stop
-            </button>
-          )}
-          {paused && (
-            <button
-              type="button"
-              onClick={() => void resumeSession()}
-              className="raised inline-flex h-8 cursor-pointer items-center rounded-full bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border transition-colors duration-150 hover:bg-accent"
-            >
-              Resume
+              <IconBook size={14} className="text-muted-foreground" />
+              <span className="hidden sm:inline">AGENTS.md</span>
             </button>
           )}
         </div>
@@ -238,22 +313,35 @@ export function ChatView({
       {connectionError && <Banner tone="muted">Reconnecting — your draft is safe.</Banner>}
       {resumeMemoryBlocked && <Banner tone="muted">Free up at least 1 GB of memory to continue this saved task. {humanBytes(memoryFree)} available now.</Banner>}
 
-      <div ref={columnRef} className="relative min-h-0 flex-1">
+      <div ref={columnRef} className="relative min-h-0 flex-1 md:py-3">
         <ThreadView
           messages={loading ? undefined : (messages || [])}
           isWorking={Boolean(isWorking)}
           hasMore={Boolean(session?.hasMoreMessages)}
           onLoadOlder={() => void loadOlder()}
           viewportRef={viewportRef}
+          onOpenFile={openFile}
+          hiddenCommandIds={queuedIds}
         />
+        <ConversationNav messages={messages} prompts={promptsQuery.data?.prompts} viewportRef={viewportRef} onJump={jumpToMessage} />
         {loadingOlder && (
-          <span role="status" className="absolute top-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-(--popover-translucent) px-3 py-1 text-[11px] text-muted-foreground ring-1 ring-border backdrop-blur-sm">
+          <span role="status" className="absolute top-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-(--popover-translucent) px-3 py-1 text-[11px] text-muted-foreground ring-1 ring-border backdrop-blur-sm">
+            <ConveyorLoop className="text-[9px] text-muted-foreground/70" trackLength={8} />
             Loading earlier messages…
           </span>
         )}
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 md:px-6">
-          <div ref={dockRef} className="pointer-events-auto mx-auto w-full max-w-3xl pb-3">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+          <div ref={dockRef} className="pointer-events-auto mx-auto w-full max-w-[52rem] px-3 pb-3 md:px-6">
+            {session?.activeRun && (
+              <RunSummary
+                session={session}
+                run={session.activeRun}
+                onStop={stopRun}
+                onInterrupt={stopRun}
+                onViewChanges={onViewChanges}
+              />
+            )}
             {interactions.map((interaction) => (
               <InteractionCard
                 key={interaction.id}
@@ -266,26 +354,43 @@ export function ChatView({
             ))}
             {canContinue ? (
               <>
+                {paused && (
+                  <div
+                    role="status"
+                    className="mb-2 flex items-center gap-2 rounded-[22px] border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
+                  >
+                    <span className="min-w-0 flex-1 text-muted-foreground">Queue paused — the agent is not processing messages.</span>
+                    <button
+                      type="button"
+                      onClick={() => void resumeSession()}
+                      className="shrink-0 cursor-pointer rounded-full bg-well px-3 py-1 text-[12px] font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-colors duration-150 hover:bg-accent"
+                    >
+                      Resume
+                    </button>
+                  </div>
+                )}
                 {queued.length > 0 && (
                   <div
                     role="status"
-                    className="mb-2 rounded-2xl bg-(--popover-translucent) px-3 py-2 text-[12px] shadow-[inset_0_0_0_1px_var(--well-outline)] backdrop-blur-sm"
+                    className="mb-2 rounded-[22px] border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
                   >
-                    <div className="mb-1 font-medium text-muted-foreground">
-                      Queued — sends when the current reply finishes
+                    <div className="flex items-baseline gap-1.5 px-1 text-[11px] text-muted-foreground">
+                      <span className="font-medium text-foreground/80">Queued</span>
+                      <span className="tabular-nums">{queued.length}</span>
+                      <span className="ml-auto">sends after this reply</span>
                     </div>
-                    <ul className="flex flex-col gap-1">
+                    <ul className="mt-1 flex flex-col">
                       {queued.map((item) => (
-                        <li key={item.id} className="flex items-center gap-2">
-                          <span className="min-w-0 flex-1 truncate text-foreground">
-                            {item.text || `${item.attachments.length} image${item.attachments.length === 1 ? '' : 's'}`}
+                        <li key={item.id} className="group/q flex items-center gap-2 rounded-lg px-1 py-1 transition-colors duration-100 hover:bg-accent">
+                          <span aria-hidden="true" className="size-1 shrink-0 rounded-full bg-muted-foreground/50" />
+                          <span className="min-w-0 flex-1 truncate text-foreground/90">
+                            {item.text || `${item.attachments.length} attachment${item.attachments.length === 1 ? '' : 's'}`}
                           </span>
-                          {item.model && <span className="shrink-0 text-[11px] text-muted-foreground">{item.model}</span>}
                           <button
                             type="button"
                             aria-label="Remove queued message"
                             onClick={() => onRemoveQueued(item.id)}
-                            className="grid size-5 shrink-0 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                            className="grid size-5 shrink-0 cursor-pointer place-items-center rounded-full text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/q:opacity-100 hover:bg-background hover:text-foreground coarse:opacity-100"
                           >
                             <IconX size={12} stroke={2.4} />
                           </button>
@@ -300,8 +405,9 @@ export function ChatView({
                   onDraftChange={onDraftChange}
                   onAttachmentsChange={onAttachmentsChange}
                   onSend={onSend}
-                  onStop={hasLivePane && agent ? () => onStop(agent) : resumeRunning && sessionId ? () => onStopSession(sessionId) : undefined}
-                  isGenerating={Boolean(isWorking)}
+                  onStop={runActive || resumeRunning || hasLivePane ? stopRun : undefined}
+                  onSteer={runActive ? steer : undefined}
+                  isGenerating={Boolean(isWorking || runActive)}
                   sending={sending}
                   sendBlocked={needsAttention}
                   placeholder={!sessionId && hasLivePane
@@ -313,6 +419,27 @@ export function ChatView({
                         : 'Ask anything…'}
                   floating
                   onToast={onToast}
+                  meta={(
+                    <>
+                      <ModelMenu
+                        model={selectedModel || session?.modelPref || context.model}
+                        context={context}
+                        directory={session?.directory}
+                        tags={session?.tags}
+                        liveAgent={hasLivePane}
+                        onSelect={onSelectModel}
+                        compact
+                      />
+                      {context.limit > 0 && (
+                        <span
+                          title={`${context.percent}% of the context window used`}
+                          className="shrink-0 tabular-nums text-[11px] text-muted-foreground"
+                        >
+                          {formatTokens(context.used)}/{formatTokens(context.limit)}
+                        </span>
+                      )}
+                    </>
+                  )}
                 />
               </>
             ) : (
@@ -326,6 +453,7 @@ export function ChatView({
           </div>
         </div>
       </div>
+      <FileViewer open={viewerOpen} file={viewerFile} onOpenChange={setViewerOpen} onToast={onToast} />
     </section>
   );
 }
