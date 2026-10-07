@@ -177,7 +177,7 @@ function parseTests(output, exitCode) {
 }
 
 function permissionMode(state) {
-  return state.permissionMode || 'dangerous';
+  return state.permissionMode || 'off';
 }
 
 export function needsPermission(state, event) {

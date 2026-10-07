@@ -31,7 +31,7 @@ function compactInput(args) {
 }
 
 function permissionMode(value) {
-  return ['off', 'dangerous', 'all'].includes(value) ? value : 'dangerous';
+  return ['off', 'dangerous', 'all'].includes(value) ? value : (['off','dangerous','all'].includes(process.env.WORKBENCH_PERMISSION) ? process.env.WORKBENCH_PERMISSION : 'off');
 }
 
 function requestQuestion(questions) {
