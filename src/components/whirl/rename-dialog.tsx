@@ -33,7 +33,7 @@ export function RenameDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[24vh] max-w-sm rounded-2xl">
+      <DialogContent className="top-[24vh] max-w-sm rounded-xl">
         <DialogTitle>Rename conversation</DialogTitle>
         <DialogDescription className="sr-only">Give this conversation a new title.</DialogDescription>
         <form
@@ -50,7 +50,7 @@ export function RenameDialog({
             onFocus={(event) => event.target.select()}
             placeholder="Conversation title"
             maxLength={120}
-            className="h-10 rounded-xl bg-well ring-[var(--well-outline)]"
+            className="h-10 rounded-md bg-well ring-[var(--well-outline)]"
           />
           <DialogFooter>
             <button

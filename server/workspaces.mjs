@@ -17,11 +17,12 @@ import { fail, uid } from './store.mjs';
 const HOME = process.env.HOME || os.homedir();
 const GIT = process.env.WORKBENCH_GIT_BIN || '/usr/bin/git';
 const ROOT = process.env.WORKBENCH_WORKTREE_ROOT || path.join(HOME, '.local/share/workbench/worktrees');
+const preparations = new Map();
 
 export const worktreeRoot = () => ROOT;
 
 export const git = (args, options = {}) => new Promise((resolve) => {
-  execFile(GIT, args, { timeout: 60000, maxBuffer: 32 * 1024 * 1024, ...options }, (error, stdout, stderr) => resolve({ error, stdout: stdout || '', stderr: stderr || '' }));
+  execFile(GIT, ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '--no-pager', ...args], { timeout: 60000, maxBuffer: 32 * 1024 * 1024, ...options }, (error, stdout, stderr) => resolve({ error, stdout: stdout || '', stderr: stderr || '' }));
 });
 
 function safeSegment(value) {
@@ -43,15 +44,27 @@ async function currentBranch(directory) {
 /* Creates the worktree under ~/.local/share/workbench/worktrees/<project>/<runId>.
    `stash create` captures tracked uncommitted changes in a dangling commit
    without altering the working tree, so the baseline is exact and safe. */
-export async function createWorktree({ projectId, conversationId, runId, root }) {
+export async function createWorktree(options) {
+  // Git's index/stash preparation needs a short per-checkout critical section.
+  // This ends before the agent starts; it is never a run/directory lease.
+  const root = options.root;
+  const previous = preparations.get(root) || Promise.resolve();
+  const pending = previous.catch(() => {}).then(() => prepareWorktree(options));
+  preparations.set(root, pending);
+  try { return await pending; }
+  finally { if (preparations.get(root) === pending) preparations.delete(root); }
+}
+
+async function prepareWorktree({ projectId, conversationId, runId, root }) {
   const head = (await git(['-C', root, 'rev-parse', 'HEAD'])).stdout.trim();
   if (!head) throw fail('The project has no commits yet; worktree isolation needs an initial commit.', 409);
   const baseBranch = await currentBranch(root);
   const stash = await git(['-C', root, 'stash', 'create']);
+  if (stash.error) throw fail(`Could not capture the project baseline: ${stash.stderr || stash.error.message}`, 409);
   const baseCommit = (!stash.error && stash.stdout.trim()) || head;
   const directory = path.join(ROOT, safeSegment(projectId), safeSegment(runId));
   mkdirSync(path.dirname(directory), { recursive: true, mode: 0o700 });
-  const branch = `workbench/run-${safeSegment(runId).slice(-12)}`;
+  const branch = `workbench/run-${safeSegment(runId)}`;
   const added = await git(['-C', root, 'worktree', 'add', '-b', branch, directory, baseCommit]);
   if (added.error) {
     await rm(directory, { recursive: true, force: true }).catch(() => {});
@@ -69,7 +82,8 @@ export async function createWorktree({ projectId, conversationId, runId, root })
 export async function worktreeChanges(worktree, { includePatch = true } = {}) {
   const directory = worktree.path;
   if (!existsSync(directory)) return { status: 'missing', files: [], additions: 0, deletions: 0, patch: '' };
-  await git(['-C', directory, 'add', '-A']);
+  const staged = await git(['-C', directory, 'add', '-A']);
+  if (staged.error) throw fail(`Could not inspect worktree: ${staged.stderr || staged.error.message}`, 409);
   const numstat = await git(['-C', directory, 'diff', '--cached', '--numstat', worktree.baseCommit, '--']);
   const files = [];
   let additions = 0;
@@ -100,8 +114,10 @@ export async function worktreeChanges(worktree, { includePatch = true } = {}) {
 export async function applyWorktree(worktree, root) {
   const directory = worktree.path;
   if (!existsSync(directory)) throw fail('This worktree no longer exists on disk.', 404);
-  await git(['-C', directory, 'add', '-A']);
+  const staged = await git(['-C', directory, 'add', '-A']);
+  if (staged.error) throw fail(`Could not stage worktree changes: ${staged.stderr || staged.error.message}`, 409);
   const diff = await git(['-C', directory, 'diff', '--cached', '--binary', worktree.baseCommit, '--']);
+  if (diff.error) throw fail(`Could not read worktree patch: ${diff.stderr || diff.error.message}`, 409);
   const patch = diff.stdout;
   if (!patch.trim()) return { status: 'applied', files: [], additions: 0, deletions: 0 };
   const numstat = await git(['-C', directory, 'diff', '--cached', '--numstat', worktree.baseCommit, '--']);
@@ -130,7 +146,7 @@ export async function discardWorktree(worktree, root) {
     const removed = await git(['-C', root, 'worktree', 'remove', '--force', worktree.path]);
     if (removed.error) {
       const pruned = await git(['-C', root, 'worktree', 'prune']);
-      if (pruned.error && existsSync(worktree.path)) {
+      if (pruned.error || existsSync(worktree.path)) {
         throw fail(`Could not remove the worktree: ${(removed.stderr || removed.error.message || '').trim().slice(0, 300)}`, 500);
       }
     }

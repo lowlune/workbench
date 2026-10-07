@@ -175,6 +175,7 @@ export interface Bootstrap {
   connections?: Connection[];
   nextCursor?: string | null;
   maxRuns?: number;
+  openTabs?: { order: string[]; pinned: string[]; activeId: string | null } | null;
 }
 
 export interface MessagePart {

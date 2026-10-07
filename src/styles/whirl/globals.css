@@ -158,15 +158,6 @@
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", "Courier New", monospace;
 
-  --radius-xs: 0.75rem;
-  --radius-sm: 0.75rem;
-  --radius-md: 0.75rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 0.75rem;
-  --radius-2xl: 0.75rem;
-  --radius-3xl: 0.75rem;
-  --radius-4xl: 0.75rem;
-
   --font-heading: var(--font-sans);
 
   --color-sidebar-ring: var(--sidebar-ring);
@@ -643,14 +634,14 @@ body {
   font-size: 0.88em;
   background: rgba(0, 0, 0, 0.05);
   padding: 0.12em 0.36em;
-  border-radius: 5px;
+  border-radius: var(--radius-md);
 }
 .dark .tiptap-prose code {
   background: rgba(255, 255, 255, 0.08);
 }
 .tiptap-prose pre {
   background: rgba(0, 0, 0, 0.05);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   padding: 0.9em 1.1em;
   overflow-x: auto;
 }
@@ -670,7 +661,7 @@ body {
 .tiptap-prose img {
   max-width: 100%;
   height: auto;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
 }
 .tiptap-prose img.ProseMirror-selectednode {
   outline: 2px solid var(--ring);
@@ -764,7 +755,7 @@ body {
  * applied, not animated in JS.
  */
 .tiptap-prose .edit-flash {
-  border-radius: 3px;
+  border-radius: var(--radius-md);
   animation: editFlash 1.6s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 }
 @keyframes editFlash {

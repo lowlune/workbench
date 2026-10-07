@@ -3,21 +3,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { currentAction, estimateEta } from './events.mjs';
+import { agentEnv, workspaceGuard } from '../security.mjs';
 
 export const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls', 'todo', 'ask_user', 'git'];
 export const BUILD_TOOLS = ['read', 'grep', 'find', 'ls', 'edit', 'write', 'bash', 'todo', 'ask_user', 'git', 'test'];
-
-const DANGEROUS_PATTERNS = [
-  /\brm\s+(-rf?|--recursive)/i,
-  /\bsudo\b/i,
-  /\b(chmod|chown)\b.*777/i,
-  /:\s*\(\)\s*\{/,
-  /curl[^|]*\|\s*(ba)?sh/i,
-  /\bgit\s+push\b.*--force/i,
-  /\bmkfs\b/i,
-  /\bdd\s+if=/i,
-  /\b(shutdown|reboot|poweroff)\b/i,
-];
 
 const TODO_SCHEMA = {
   type: 'object',
@@ -110,13 +99,15 @@ function normalizeQuestions(input) {
 
 function runProcess(command, args, { cwd, shell = false, timeout = 600000, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, shell, env: process.env });
+    const child = spawn(command, args, { cwd, shell, env: agentEnv() });
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const timer = timeout ? setTimeout(() => { child.kill('SIGTERM'); }, timeout) : null;
-    const onAbort = () => child.kill('SIGTERM');
+    let killTimer;
+    const onAbort = () => { child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 1000); killTimer.unref(); };
+    const timer = timeout ? setTimeout(onAbort, Math.min(600000, Math.max(1, timeout))) : null;
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     const append = (chunk, target) => {
       const value = target === 'out' ? stdout + chunk : stderr + chunk;
       if (target === 'out') stdout = value.length > 2_000_000 ? value.slice(-1_000_000) : value;
@@ -126,6 +117,7 @@ function runProcess(command, args, { cwd, shell = false, timeout = 600000, signa
     child.stderr?.on('data', (chunk) => append(String(chunk), 'err'));
     const cleanup = () => {
       if (timer) clearTimeout(timer);
+      clearTimeout(killTimer);
       if (signal) signal.removeEventListener('abort', onAbort);
     };
     child.on('error', (error) => {
@@ -188,21 +180,22 @@ function permissionMode(state) {
   return state.permissionMode || 'dangerous';
 }
 
-function needsPermission(state, event) {
+export function needsPermission(state, event) {
   const mode = permissionMode(state);
   if (mode === 'off') return false;
   if (mode === 'all') {
-    if (!['bash', 'edit', 'write'].includes(event.toolName)) return false;
+    if (!['bash', 'test', 'edit', 'write'].includes(event.toolName)) return false;
     return !state.allowedTools.has(event.toolName);
   }
-  if (event.toolName !== 'bash') return false;
-  const command = typeof event.input?.command === 'string' ? event.input.command : '';
-  return DANGEROUS_PATTERNS.some((pattern) => pattern.test(command));
+  // Legacy 'dangerous' means approve shell execution, not guess shell grammar.
+  return ['bash', 'test'].includes(event.toolName) && !state.allowedTools.has(event.toolName);
 }
 
 export function createWorkbenchExtension(port) {
   return (pi) => {
     pi.on('tool_call', async (event) => {
+      const guarded = workspaceGuard(port.cwd, event);
+      if (guarded) return guarded;
       if (event.toolName === 'write' && typeof event.input?.path === 'string') {
         const full = path.resolve(port.cwd, event.input.path);
         try {

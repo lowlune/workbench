@@ -76,7 +76,7 @@ export function ModelPicker({
   function option(model: Offering) {
     const favorite = favorites.includes(model.id);
     return (
-      <div key={`${model.engine}:${model.id}`} className="flex items-center rounded-lg hover:bg-accent">
+      <div key={`${model.engine}:${model.id}`} className="flex items-center rounded-md hover:bg-accent">
         <button
           role="option"
           aria-selected={value === model.id}
@@ -176,8 +176,8 @@ export function ModelPicker({
         </div>
         <div className="flex flex-wrap items-center gap-1 border-t border-border p-2 text-[11px]">
           {data?.error && <span className="mr-auto max-w-40 truncate text-destructive" title={data.error}>Catalog: {data.error}</span>}
-          {value && <button className="ml-auto rounded-lg px-2 py-1 hover:bg-accent" onClick={() => void setDefault('user')}>Set my default</button>}
-          {value && project && <button className="rounded-lg px-2 py-1 hover:bg-accent" onClick={() => void setDefault('project')}>Default for {project.name}</button>}
+          {value && <button className="ml-auto rounded-md px-2 py-1 hover:bg-accent" onClick={() => void setDefault('user')}>Set my default</button>}
+          {value && project && <button className="rounded-md px-2 py-1 hover:bg-accent" onClick={() => void setDefault('project')}>Default for {project.name}</button>}
         </div>
       </PopoverContent>
     </Popover>

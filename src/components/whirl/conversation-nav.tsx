@@ -83,7 +83,7 @@ export function ConversationNav({ messages, prompts: providedPrompts, viewportRe
                 index === active ? 'w-4 bg-foreground' : 'w-2.5 bg-muted-foreground/40 group-hover/nav:w-4 group-hover/nav:bg-muted-foreground',
               )}
             />
-            <span className="raised pointer-events-none absolute top-1/2 left-full ml-2 hidden max-w-xs -translate-y-1/2 truncate rounded-lg bg-popover px-2 py-1 text-[11px] text-popover-foreground ring-1 ring-border group-hover/nav:block">
+            <span className="raised pointer-events-none absolute top-1/2 left-full ml-2 hidden max-w-xs -translate-y-1/2 truncate rounded-md bg-popover px-2 py-1 text-[11px] text-popover-foreground ring-1 ring-border group-hover/nav:block">
               {prompt.preview}
             </span>
           </button>

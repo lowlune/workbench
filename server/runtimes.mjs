@@ -1,12 +1,18 @@
-import { fork, spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decode, fail } from './store.mjs';
+import { sandboxSpawn, signalGroup, terminateGroup } from './security.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('OPENCODE_')));
+const freePort = () => new Promise((resolve, reject) => {
+  const server = createServer();
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(error => error ? reject(error) : resolve(port)); });
+});
 
 export const CAPABILITIES = {
   opencode: { images: true, files: true, questions: true, permissions: true, usage: true, fork: true, modes: true, plan: true },
@@ -67,24 +73,33 @@ function dispatchPiEvent(event, hooks) {
 }
 
 export class OpenCodeRuntime {
-  constructor({ dataDir, onEvent }) {
+  constructor({ dataDir, onEvent, sandbox = null }) {
     this.dataDir = dataDir;
     this.onEvent = onEvent;
     this.password = randomBytes(32).toString('hex');
-    this.port = Number(process.env.WORKBENCH_OPENCODE_PORT || 4198);
+    this.port = 0;
+    this.sandbox = sandbox;
     this.child = null;
     this.starting = null;
     this.runs = new Map();
   }
 
   async start() {
+    if (this.closing) throw new Error('OpenCode runtime is stopping.');
     if (this.starting) return this.starting;
     if (this.child) return;
     this.starting = (async () => {
       this.startError = null;
-      const child = spawn(process.env.WORKBENCH_OPENCODE_BIN || path.join(process.env.HOME, '.opencode/bin/opencode'),
+      this.port = await freePort();
+      if (this.closing) throw new Error('OpenCode runtime was cancelled before startup.');
+      const discovery = path.join(this.dataDir, 'discovery');
+      mkdirSync(discovery, { recursive: true, mode: 0o700 });
+      const nativeState = path.join(process.env.HOME, '.local/share/opencode');
+      mkdirSync(nativeState, { recursive: true, mode: 0o700 });
+      const child = sandboxSpawn(process.env.WORKBENCH_OPENCODE_BIN || path.join(process.env.HOME, '.opencode/bin/opencode'),
         ['serve', '--pure', '--hostname', '127.0.0.1', '--port', String(this.port)],
-        { cwd: this.dataDir, env: { ...cleanEnv(), OPENCODE_SERVER_USERNAME: 'workbench', OPENCODE_SERVER_PASSWORD: this.password }, stdio: ['ignore', 'pipe', 'pipe'] });
+        { dataDir: this.dataDir, workspace: discovery, readOnly: true, ...this.sandbox, runtimeRw: [nativeState] },
+        { runtimeEnv: { OPENCODE_SERVER_USERNAME: 'workbench', OPENCODE_SERVER_PASSWORD: this.password }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.child = child;
       child.stdout.resume();
       let stderr = '';
@@ -99,9 +114,21 @@ export class OpenCodeRuntime {
         if (child.exitCode !== null) throw new Error(`OpenCode could not start: ${stderr.slice(-500)}`);
         try { await this.request('/global/health', undefined, undefined, 1500); return; } catch { await sleep(200); }
       }
-      child.kill();
+      terminateGroup(child);
       throw new Error('OpenCode startup timed out.');
-    })().finally(() => { this.starting = null; });
+    })().catch(async error => {
+      /* A transient startup failure must not permanently disable the shared
+         runtime: reap the partial child and reset state, but leave `closing`
+         untouched so the next run can start a fresh server. */
+      const child = this.child;
+      this.child = null;
+      this.port = 0;
+      this.startError = null;
+      if (child && child.exitCode === null && !child.signalCode) {
+        await new Promise(resolve => { child.once('close', resolve); terminateGroup(child); });
+      }
+      throw error;
+    }).finally(() => { this.starting = null; });
     return this.starting;
   }
 
@@ -167,6 +194,17 @@ export class OpenCodeRuntime {
   }
 
   async run(conversation, command, attachments, hooks) {
+    // A shared writable server would let one agent execute in another agent's
+    // workspace. Keep only discovery shared; each resident run owns its server.
+    const runtime = new OpenCodeRuntime({ dataDir: this.dataDir, sandbox: {
+      workspace: conversation.directory, readOnly: conversation.mode === 'plan',
+    } });
+    this.runs.set(conversation.id, { runtime });
+    try { await runtime.runScoped(conversation, command, attachments, hooks); }
+    finally { await runtime.close(); this.runs.delete(conversation.id); }
+  }
+
+  async runScoped(conversation, command, attachments, hooks) {
     await this.start();
     let nativeId = conversation.native_id;
     if (!nativeId) {
@@ -199,7 +237,7 @@ export class OpenCodeRuntime {
         hooks.message({ id: item.info.id, created: item.info.time?.created || Date.now(), info: { ...item.info, role: 'assistant' }, parts: item.parts || [] });
       };
       if (immediate) publish();
-      else timers.set(id, setTimeout(publish, 80));
+      else timers.set(id, setTimeout(publish, 3000));
     };
 
     let idle = false;
@@ -257,7 +295,7 @@ export class OpenCodeRuntime {
           if (properties.info.error) failure = properties.info.error.data?.message || properties.info.error.name || 'Model request failed.';
           if (properties.info.time?.completed && properties.info.finish && !['tool-calls', 'unknown'].includes(properties.info.finish)) completed = true;
         }
-        emit(properties.info.id);
+        emit(properties.info.id, !!properties.info.time?.completed);
         settle();
       }
       if (properties.part?.sessionID === nativeId && event.type === 'message.part.updated') {
@@ -272,6 +310,7 @@ export class OpenCodeRuntime {
         const part = item?.parts.find((candidate) => candidate.id === properties.partID);
         if (part && typeof properties.delta === 'string') {
           part[properties.field || 'text'] = (part[properties.field || 'text'] || '') + properties.delta;
+          if ((!properties.field || properties.field === 'text') && part.type === 'text') hooks.tool?.({ kind: 'text.delta', messageId: properties.messageID, delta: properties.delta });
           emit(properties.messageID);
         }
       }
@@ -310,6 +349,9 @@ export class OpenCodeRuntime {
           parts,
         }, conversation.directory);
         submitted = true;
+        /* The prompt was accepted, so the input turn exists even if the newest
+           page snapshot no longer contains it (long sessions). */
+        sawInput = true;
       } catch (error) {
         error.uncertain = true;
         throw error;
@@ -343,18 +385,28 @@ export class OpenCodeRuntime {
   async stop(conversationId) {
     const handle = this.runs.get(conversationId);
     if (!handle) return;
+    if (handle.runtime) { await handle.runtime.stop(conversationId); await handle.runtime.close(); return; }
     await this.request(`/session/${handle.nativeId}/abort`, {}, handle.directory).catch(() => {});
     handle.controller.abort('cancelled');
   }
 
   async respond(conversation, interaction, body) {
+    const runtime = this.runs.get(conversation.id)?.runtime;
+    if (runtime) return runtime.respond(conversation, interaction, body);
+    const directory = this.runs.get(conversation.id)?.directory || conversation.directory;
     const route = interaction.kind === 'permission' ? `/permission/${interaction.id}/reply` : `/question/${interaction.id}/${body.reject ? 'reject' : 'reply'}`;
-    return this.request(route, interaction.kind === 'permission' ? { reply: body.reply } : body.reject ? {} : { answers: body.answers }, conversation.directory);
+    return this.request(route, interaction.kind === 'permission' ? { reply: body.reply } : body.reject ? {} : { answers: body.answers }, directory);
   }
 
-  close() {
-    for (const handle of this.runs.values()) handle.controller.abort('shutdown');
-    this.child?.kill('SIGTERM');
+  async close() {
+    this.closing = true;
+    for (const handle of this.runs.values()) {
+      if (handle.runtime) await handle.runtime.close();
+      else handle.controller.abort('shutdown');
+    }
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode) return;
+    await new Promise(resolve => { child.once('close', resolve); terminateGroup(child); });
   }
 }
 
@@ -364,12 +416,14 @@ export class PiRuntime {
     this.runs = new Map();
   }
 
-  spawn() {
-    return fork(fileURLToPath(new URL('./pi-runner.mjs', import.meta.url)), [], {
-      env: cleanEnv(),
-      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-      detached: true,
-    });
+  spawn(sandbox = null) {
+    const file = fileURLToPath(new URL('./pi-runner.mjs', import.meta.url));
+    const agentDir = path.join(this.dataDir, 'pi');
+    const discovery = path.join(this.dataDir, 'discovery');
+    for (const dir of [agentDir, discovery]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return sandboxSpawn(process.execPath, ['--max-old-space-size=512', file], {
+      workspace: discovery, readOnly: true, ...sandbox, dataDir: this.dataDir, runtimeRw: [agentDir],
+    }, { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   }
 
   async models() {
@@ -384,7 +438,7 @@ export class PiRuntime {
         if (error) reject(error);
         else resolve(value);
       };
-      const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} finish(new Error('Pi model discovery timed out.')); }, 60000);
+      const timer = setTimeout(() => { terminateGroup(child); finish(new Error('Pi model discovery timed out.')); }, 60000);
       timer.unref();
       child.once('error', (error) => finish(error));
       child.once('exit', (code, signal) => finish(new Error(`Pi model discovery exited (${signal || code}).`)));
@@ -396,12 +450,16 @@ export class PiRuntime {
   }
 
   async run(conversation, command, attachments, hooks) {
-    const child = this.spawn();
+    const workspace = conversation.directory;
+    const child = this.spawn({ workspace, readOnly: conversation.mode === 'plan' });
     this.runs.set(conversation.id, child);
-    child.stderr.resume();
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} finish(new Error('Pi run exceeded its two-hour time budget.')); }, 2 * 60 * 60 * 1000);
+      let resultError;
+      let reportedDone = false;
+      const timer = setTimeout(() => { resultError = new Error('Pi run exceeded its two-hour time budget.'); terminateGroup(child); }, 2 * 60 * 60 * 1000);
       timer.unref();
       const finish = (error) => {
         if (settled) return;
@@ -412,20 +470,32 @@ export class PiRuntime {
         else resolve();
       };
       child.once('error', (error) => finish(error));
-      child.once('exit', (code, signal) => finish(code === 0 && !signal ? null : new Error(`Pi runner exited (${signal || code}).`)));
+      child.once('close', (code, signal) => {
+        signalGroup(child, 'SIGKILL');
+        finish(resultError || (reportedDone && code === 0 && !signal ? null : new Error(`Pi runner exited (${signal || code}): ${stderr.slice(-500)}`)));
+      });
       child.on('message', (event) => {
+        try {
         if (event.type === 'binding') hooks.binding(event.nativeId);
         else if (event.type === 'message') hooks.message(event.message);
         else if (event.type === 'activity') hooks.activity?.(event.activity);
         else if (event.type === 'event') dispatchPiEvent(event.event, hooks);
-        else if (event.type === 'done') finish(event.error ? new Error(event.error) : null);
+        else if (event.type === 'done') {
+          reportedDone = true;
+          resultError = event.error ? new Error(event.error) : null;
+          // The runner normally exits immediately after sending done.
+          const reap = setTimeout(() => terminateGroup(child), 1000);
+          reap.unref();
+          child.once('close', () => clearTimeout(reap));
+        }
+        } catch (error) { resultError = error; terminateGroup(child); }
       });
-      hooks.running();
+      try { hooks.running(); } catch (error) { resultError = error; terminateGroup(child); return; }
       child.send({
         type: 'run',
         commandId: command.id,
         directory: conversation.directory,
-        nativeId: conversation.native_id,
+        nativeId: Number(command.attempts) > 0 ? null : conversation.native_id,
         model: command.model,
         reasoning: command.reasoning,
         mode: conversation.mode,
@@ -457,13 +527,14 @@ export class PiRuntime {
     const child = this.runs.get(conversationId);
     if (!child) return;
     try { child.send({ type: 'stop' }); } catch {}
-    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }, 5000);
+    const timer = setTimeout(() => terminateGroup(child), 5000);
     timer.unref();
+    child.once('close', () => clearTimeout(timer));
   }
 
   close() {
     for (const child of this.runs.values()) {
-      try { process.kill(-child.pid, 'SIGTERM'); } catch {}
+      terminateGroup(child);
     }
   }
 }

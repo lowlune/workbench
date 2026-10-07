@@ -74,7 +74,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
             ['Cache read', formatTokens(totals?.cacheRead || 0)],
             ['Recorded value', money(totals?.cost)],
           ] as const).map(([label, value]) => (
-            <div key={label} className="rounded-2xl bg-well p-4">
+            <div key={label} className="rounded-xl bg-well p-4">
               <p className="text-[11px] text-muted-foreground">{label}</p>
               <p className="mt-1 text-lg font-semibold tabular-nums">{value}</p>
             </div>
@@ -85,11 +85,11 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
         <LimitsPacing onToast={onToast} />
 
         {daily.length > 1 && (
-          <div className="mt-6 rounded-2xl bg-well p-4">
+          <div className="mt-6 rounded-xl bg-well p-4">
             <div className="flex items-end justify-between"><h2 className="text-sm font-medium">Daily requests</h2><span className="text-[11px] text-muted-foreground">{daily[0].day} → {daily.at(-1)!.day}</span></div>
             <div className="mt-3 flex h-16 items-end gap-px" role="img" aria-label="Daily request chart">
               {daily.map((day) => (
-                <div key={day.day} title={`${day.day}: ${day.requests} requests, ${formatTokens(day.output)} output`} className="min-w-px flex-1 rounded-t bg-foreground/25 transition-colors hover:bg-foreground/50" style={{ height: `${Math.max(3, Math.round((day.requests / maxDaily) * 64))}px` }} />
+                <div key={day.day} title={`${day.day}: ${day.requests} requests, ${formatTokens(day.output)} output`} className="min-w-px flex-1 rounded-t-md bg-foreground/25 transition-colors hover:bg-foreground/50" style={{ height: `${Math.max(3, Math.round((day.requests / maxDaily) * 64))}px` }} />
               ))}
             </div>
           </div>
@@ -128,7 +128,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
         <p className="mt-1 text-xs text-muted-foreground">Provider quota is only shown when the provider reports it. OpenCode Go and ChatGPT plans do not expose a public quota API here.</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           {conns.data?.connections.map((connection: Connection) => (
-            <article key={connection.id} className="rounded-2xl bg-well p-4">
+            <article key={connection.id} className="rounded-xl bg-well p-4">
               <div className="flex items-center gap-2">
                 <span className={cn('size-2 rounded-full', connection.health === 'ok' ? 'bg-emerald-500' : connection.health === 'error' ? 'bg-destructive' : 'bg-muted-foreground/40')} aria-hidden="true" />
                 <p className="text-sm font-medium">{connection.label}</p>
@@ -147,7 +147,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
           {!conns.data?.connections.length && <p className="text-xs text-muted-foreground">No provider connections found.</p>}
         </div>
 
-        <div className="mt-5 rounded-2xl bg-well p-4">
+        <div className="mt-5 rounded-xl bg-well p-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium">Connect an API key</h3>
             <button className="inline-flex items-center gap-1 text-xs underline" onClick={() => void mutate('/models/refresh', {}).then(() => client.invalidateQueries({ queryKey: ['model-offerings'] })).catch((error) => onToast(error.message, true))}>
@@ -156,16 +156,16 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
           </div>
           <p className="mt-1 text-xs text-muted-foreground">Pi reuses OpenCode API keys without copying OAuth refresh tokens. OpenAI OAuth stays managed by OpenCode.</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <select aria-label="Connection engine" className="rounded-lg bg-background p-2 text-sm" value={engine} onChange={(event) => setEngine(event.target.value)}>
+            <select aria-label="Connection engine" className="rounded-md bg-background p-2 text-sm" value={engine} onChange={(event) => setEngine(event.target.value)}>
               <option value="opencode">OpenCode</option><option value="pi">Pi</option>
             </select>
-            <input aria-label="Provider ID" className="min-w-0 flex-1 rounded-lg bg-background p-2 text-sm" value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="Provider ID (e.g. openai)" />
-            <input aria-label="Provider API key" type="password" autoComplete="off" className="w-full rounded-lg bg-background p-2 text-sm" placeholder="API key — stored on your VPS" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+            <input aria-label="Provider ID" className="min-w-0 flex-1 rounded-md bg-background p-2 text-sm" value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="Provider ID (e.g. openai)" />
+            <input aria-label="Provider API key" type="password" autoComplete="off" className="w-full rounded-md bg-background p-2 text-sm" placeholder="API key — stored on your VPS" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
             <button disabled={busy || !apiKey || !provider} onClick={() => void connect()} className="rounded-full bg-primary px-3 py-2 text-xs text-primary-foreground disabled:opacity-40">{busy ? 'Connecting…' : 'Connect'}</button>
           </div>
         </div>
 
-        <div className="mt-4 rounded-2xl bg-well p-4 text-xs">
+        <div className="mt-4 rounded-xl bg-well p-4 text-xs">
           <h3 className="text-sm font-medium">OpenAI OAuth / subscription</h3>
           <p className="mt-1 text-muted-foreground">OpenCode owns and refreshes this connection. API billing and subscription limits are separate.</p>
           {!oauth ? (
@@ -174,7 +174,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
             <div className="mt-3 space-y-2">
               <a href={oauth.url} target="_blank" rel="noreferrer" className="block underline">Open provider authorization</a>
               <p className="whitespace-pre-wrap">{oauth.instructions}</p>
-              {oauth.method === 'code' && <input aria-label="Authorization code" value={code} onChange={(event) => setCode(event.target.value)} className="w-full rounded-lg bg-background p-2" placeholder="Authorization code" />}
+              {oauth.method === 'code' && <input aria-label="Authorization code" value={code} onChange={(event) => setCode(event.target.value)} className="w-full rounded-md bg-background p-2" placeholder="Authorization code" />}
               <button disabled={busy} className="rounded-full bg-primary px-3 py-2 text-primary-foreground disabled:opacity-40" onClick={() => { setBusy(true); void mutate('/connections/oauth/complete', { provider: oauth.provider, authMethod: oauth.authMethod, code }).then(() => { setOauth(undefined); setCode(''); void client.invalidateQueries({ queryKey: ['connections'] }); void client.invalidateQueries({ queryKey: ['model-offerings'] }); onToast('OpenAI connected.'); }).catch((error) => onToast(error.message, true)).finally(() => setBusy(false)); }}>{busy ? 'Waiting for authorization…' : 'Complete sign-in'}</button>
             </div>
           )}
@@ -232,7 +232,7 @@ function PacingCard({ label, metric, source }: { label: string; metric: PacingMe
   const pace = paceText(metric);
   const format = (value: number) => label === 'Cost' ? money(value) : label === 'Requests' ? String(value) : formatTokens(value);
   return (
-    <div className="rounded-2xl bg-well p-4">
+    <div className="rounded-xl bg-well p-4">
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-muted-foreground">{label}</p>
         {sourceBadge(source)}
@@ -363,12 +363,12 @@ function LimitsPacing({ onToast }: { onToast: (message: string, isError?: boolea
       </div>
 
       {!endpointMissing && (
-        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl bg-well p-4">
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-well p-4">
           <span className="text-xs font-medium">Set a manual budget</span>
-          <select aria-label="Budget period" className="rounded-lg bg-background p-2 text-xs" value={period} onChange={(event) => setPeriod(event.target.value as 'weekly' | 'monthly')}>
+          <select aria-label="Budget period" className="rounded-md bg-background p-2 text-xs" value={period} onChange={(event) => setPeriod(event.target.value as 'weekly' | 'monthly')}>
             <option value="weekly">Weekly</option><option value="monthly">Monthly</option>
           </select>
-          <select aria-label="Budget metric" className="rounded-lg bg-background p-2 text-xs" value={metric} onChange={(event) => setMetric(event.target.value as 'tokens' | 'cost' | 'requests')}>
+          <select aria-label="Budget metric" className="rounded-md bg-background p-2 text-xs" value={metric} onChange={(event) => setMetric(event.target.value as 'tokens' | 'cost' | 'requests')}>
             <option value="tokens">Tokens</option><option value="cost">Cost (USD)</option><option value="requests">Requests</option>
           </select>
           <input
@@ -377,7 +377,7 @@ function LimitsPacing({ onToast }: { onToast: (message: string, isError?: boolea
             value={value}
             onChange={(event) => setValue(event.target.value)}
             placeholder={metric === 'cost' ? '20' : '1000000'}
-            className="w-28 rounded-lg bg-background p-2 text-xs"
+            className="w-28 rounded-md bg-background p-2 text-xs"
           />
           <button
             type="button"

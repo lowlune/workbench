@@ -141,7 +141,7 @@ export function ChangesPanel({ open, onOpenChange, target, onToast, onChanged }:
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[6vh] flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0">
+      <DialogContent className="top-[6vh] flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-xl p-0">
         <DialogTitle className="sr-only">Run changes</DialogTitle>
         <DialogDescription className="sr-only">Review the files a run changed in its isolated worktree, then apply or discard them.</DialogDescription>
 

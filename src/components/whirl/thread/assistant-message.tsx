@@ -4,7 +4,7 @@ import { Markdown } from '@/components/whirl/markdown';
 import { MessageActionButton } from '@/components/whirl/message-action-button';
 import { ToolActivity } from '@/components/whirl/thread/activity';
 import { SystemMessage, normalText, systemTexts } from '@/components/whirl/thread/system-message';
-import { isToolPart } from '@/components/whirl/thread/tool-data';
+import { uniqueToolParts } from '@/components/whirl/thread/tool-data';
 import { formatTokens, messageContext } from '@/lib/format';
 import type { FileRef } from '@/components/whirl/file-viewer';
 import type { Message } from '@/lib/types';
@@ -24,20 +24,35 @@ export const AssistantMessage = memo(function AssistantMessage({
 }) {
   const text = normalText(message);
   const notices = systemTexts(message);
-  const tools = message.parts.filter(isToolPart);
+  const tools = uniqueToolParts(message.parts);
+  const images = message.parts.filter((part) => part.type === 'file' && part.mime?.startsWith('image/') && part.url);
   const context = messageContext(message);
   const model = message.info.modelName || message.info.modelID;
   const hasStats = Boolean(model || context.used || context.output);
 
-  if (!text && !tools.length && !notices.length) return null;
+  if (!text && !tools.length && !notices.length && !images.length) return null;
 
   return (
     <div className="group/msg flex w-full min-w-0 flex-col items-start">
-      {notices.map((notice, index) => <SystemMessage key={index} text={notice} />)}
+      {[...new Set(notices)].map((notice) => <SystemMessage key={notice} text={notice} />)}
       {text.length > 0 && <Markdown>{text}</Markdown>}
       {tools.length > 0 && (
         <div className={cn('w-full min-w-0', text.length > 0 && 'mt-1.5')}>
-          <ToolActivity tools={tools} running={isWorking} onOpenFile={onOpenFile} />
+          <ToolActivity tools={tools} onOpenFile={onOpenFile} />
+        </div>
+      )}
+      {images.length > 0 && (
+        <div className={cn('flex w-full min-w-0 flex-wrap gap-2', (text.length > 0 || tools.length > 0) && 'mt-2')}>
+          {images.map((part) => (
+            <a key={part.id} href={part.url} target="_blank" rel="noreferrer" className="block max-w-full">
+              <img
+                src={part.url}
+                alt={part.filename || 'Tool image'}
+                loading="lazy"
+                className="max-h-80 max-w-full rounded-xl object-contain shadow-[inset_0_0_0_1px_var(--well-outline)]"
+              />
+            </a>
+          ))}
         </div>
       )}
       {!isWorking && text.length > 0 && (

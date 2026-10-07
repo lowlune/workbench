@@ -43,7 +43,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
 
   if (interaction.kind === 'permission') {
     return (
-      <div className="mb-3 overflow-hidden rounded-2xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Permission required">
+      <div className="mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Permission required">
         <div className="flex items-center gap-2 bg-amber-500/10 px-3.5 py-2 text-[12px] font-medium text-amber-700 dark:text-amber-300">
           <IconAlertTriangleFilled size={14} className="shrink-0" />
           Permission required — the run is paused
@@ -71,7 +71,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
   }
 
   return (
-    <div className="mb-3 overflow-hidden rounded-2xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Agent question">
+    <div className="mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Agent question">
       <div className="flex items-center gap-2 bg-(--well-translucent) px-3.5 py-2 text-[12px] font-medium text-foreground">
         <IconHelpCircle size={14} className="shrink-0 text-muted-foreground" />
         The agent is waiting for your answer
@@ -94,7 +94,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
                     aria-pressed={checked}
                     onClick={() => toggle(questionIndex, option.label, Boolean(question.multiple))}
                     className={cn(
-                      'max-w-full cursor-pointer rounded-xl px-3 py-2 text-left text-[13px] transition-colors duration-100 disabled:opacity-40',
+                      'max-w-full cursor-pointer rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-100 disabled:opacity-40',
                       checked
                         ? 'bg-primary/10 text-foreground shadow-[inset_0_0_0_1px_var(--primary)]'
                         : 'bg-background shadow-[inset_0_0_0_1px_var(--well-outline)] hover:bg-accent',
@@ -103,10 +103,10 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
                     <span className="flex items-center gap-2">
                       <span className={cn(
                         'grid size-3.5 shrink-0 place-items-center border border-muted-foreground/50',
-                        question.multiple ? 'rounded-[4px]' : 'rounded-full',
+                        question.multiple ? 'rounded-md' : 'rounded-full',
                         checked && 'border-primary bg-primary',
                       )}>
-                        {checked && <span className={cn('size-1.5 bg-primary-foreground', question.multiple ? 'rounded-[2px]' : 'rounded-full')} />}
+                        {checked && <span className={cn('size-1.5 bg-primary-foreground', question.multiple ? 'rounded-md' : 'rounded-full')} />}
                       </span>
                       <span className="min-w-0">
                         <span className="block">{option.label}</span>
@@ -123,7 +123,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
               onChange={(event) => setCustom((current) => current.map((value, index) => index === questionIndex ? event.target.value : value))}
               placeholder={question.options?.length ? 'Or type your own answer…' : 'Type your answer…'}
               aria-label={`Custom answer: ${question.question}`}
-              className="mt-2 w-full rounded-xl bg-background px-3 py-2 text-[13px] shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none transition-shadow focus:shadow-[inset_0_0_0_1px_var(--primary)] disabled:opacity-40"
+              className="mt-2 w-full rounded-md bg-background px-3 py-2 text-[13px] shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none transition-shadow focus:shadow-[inset_0_0_0_1px_var(--primary)] disabled:opacity-40"
             />
           </fieldset>
         ))}

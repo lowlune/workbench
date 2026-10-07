@@ -24,10 +24,10 @@ import { Store, uid } from '../server/store.mjs';
 
 const HOME = process.env.HOME || os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DATA = process.env.WORKBENCH_ACCEPTANCE_DATA || '/tmp/opencode/wb-acceptance';
+const DATA = process.env.WORKBENCH_ACCEPTANCE_DATA || path.join(HOME, '.cache/workbench-acceptance/data');
 const PORT = Number(process.env.WORKBENCH_ACCEPTANCE_PORT || 8797);
 const OC_PORT = Number(process.env.WORKBENCH_ACCEPTANCE_OPENCODE_PORT || 4297);
-const WT_ROOT = process.env.WORKBENCH_ACCEPTANCE_WORKTREES || '/tmp/opencode/wb-acceptance-worktrees';
+const WT_ROOT = process.env.WORKBENCH_ACCEPTANCE_WORKTREES || path.join(HOME, '.cache/workbench-acceptance/worktrees');
 const PROJECT_DIR = path.join(HOME, 'projects/_wb-acceptance');
 const BASE = `http://127.0.0.1:${PORT}/api/v2`;
 const KEY = JSON.parse(await readFile(path.join(HOME, '.config/secrets/workbench-cloudflare-secrets.json'), 'utf8')).WORKBENCH_PROXY_KEY;
@@ -366,13 +366,13 @@ async function run() {
       if (!entry.exists) throw new Error('nested AGENTS.md exists on disk but is reported as missing');
       return `${nested.files.length} scope(s): ${scopes.join(',')}`;
     });
-    /* BUG (server/control.mjs:405): a relative `path` is resolved against the
-       control CWD, not the project root, so nested detection silently fails. */
+    /* A relative `path` must resolve against the project root, not the control
+       CWD (regression: nested detection used to silently fail). */
     await check('GET /agents-md resolves a project-relative path against the project', async () => {
       const nested = await must(`/agents-md?projectId=${PROJECT_ID}&path=packages/site/src`);
       if (!nested.files.some((file) => file.scope === 'nested')) throw new Error('relative path produced no nested scope');
       return `${nested.files.length} scope(s)`;
-    }, { soft: true });
+    });
   } finally {
     await rm(path.join(PROJECT_DIR, 'AGENTS.md'), { force: true });
     await rm(path.join(PROJECT_DIR, 'packages'), { recursive: true, force: true });

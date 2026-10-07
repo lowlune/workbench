@@ -97,7 +97,7 @@ export function HomeView({
             <SectionHead title="Live agents" />
             <div className="grid gap-2 sm:grid-cols-2">
               {agents.map((agent) => (
-                <article key={agent.paneId} className="flex min-w-0 flex-col gap-2.5 rounded-2xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
+                <article key={agent.paneId} className="flex min-w-0 flex-col gap-2.5 rounded-xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
                   <div className="flex min-w-0 items-start gap-2.5">
                     <span aria-hidden="true" className={cn(
                       'mt-1.5 size-1.5 shrink-0 rounded-full',
@@ -204,7 +204,7 @@ function ProjectChip({
             key={item.directory}
             type="button"
             onClick={() => onChange(item.directory)}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
+            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
           >
             <IconFolder size={14} className="shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
@@ -234,7 +234,7 @@ function KindChip({ value, onChange }: { value: 'opencode' | 'pi'; onChange: (ki
             key={option}
             type="button"
             onClick={() => onChange(option)}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
+            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
           >
             <span className="min-w-0 flex-1">{option === 'pi' ? 'Pi' : 'OpenCode'}</span>
             {value === option && <IconCheck size={14} className="shrink-0" />}

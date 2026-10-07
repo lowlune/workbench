@@ -186,7 +186,7 @@ function MenuItem({ icon, children, onClick, danger }: { icon: ReactNode; childr
       type="button"
       role="menuitem"
       onClick={onClick}
-      className={`flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent ${danger ? 'text-destructive hover:bg-destructive/10' : ''}`}
+      className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent ${danger ? 'text-destructive hover:bg-destructive/10' : ''}`}
     >
       <span className={danger ? '' : 'text-muted-foreground'}>{icon}</span>
       {children}

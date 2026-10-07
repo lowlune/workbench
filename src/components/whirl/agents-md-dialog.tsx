@@ -80,7 +80,7 @@ export function AgentsMdDialog({ open, onOpenChange, projectId, projectName, pat
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[6vh] flex h-[84vh] w-[calc(100vw-2rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0">
+      <DialogContent className="top-[6vh] flex h-[84vh] w-[calc(100vw-2rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-xl p-0">
         <DialogTitle className="sr-only">AGENTS.md instructions</DialogTitle>
         <DialogDescription className="sr-only">View and edit the global and project instruction files your agent loads into context.</DialogDescription>
 
@@ -122,7 +122,7 @@ export function AgentsMdDialog({ open, onOpenChange, projectId, projectName, pat
                     type="button"
                     onClick={() => { setActivePath(file.path); setLoadedFor(''); }}
                     className={cn(
-                      'min-w-52 cursor-pointer rounded-xl px-2.5 py-2 text-left transition-colors duration-100 md:min-w-0',
+                      'min-w-52 cursor-pointer rounded-md px-2.5 py-2 text-left transition-colors duration-100 md:min-w-0',
                       selected ? 'bg-accent' : 'hover:bg-accent/60',
                     )}
                   >

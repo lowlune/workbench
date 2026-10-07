@@ -35,6 +35,15 @@ function normalizeRecipients(value) {
     .slice(0, 20);
 }
 
+/* Values interpolated into SMTP commands/headers must not carry embedded CR/LF
+   (header/command injection); surrounding whitespace is stripped. */
+function safeHeaderValue(value, fallback = null) {
+  if (typeof value !== 'string') return fallback;
+  const text = value.trim();
+  if (/[\r\n]/.test(text)) throw fail('SMTP settings must not contain line breaks.');
+  return text || fallback;
+}
+
 /* Accept either one `smtp` object or individual `smtp.host`, `smtp.port`, …
    keys; the object wins field by field. */
 export function readSmtpConfig(store) {
@@ -107,14 +116,14 @@ export function validateSmtpInput(store, input) {
     secure: input.secure === undefined ? current.secure || port === 465 : input.secure === true || port === 465,
     requireTls: input.requireTls === undefined ? current.requireTls : input.requireTls !== false,
     rejectUnauthorized: input.rejectUnauthorized === undefined ? current.rejectUnauthorized : input.rejectUnauthorized !== false,
-    user: input.user === undefined ? current.user : (pickString(input.user, '') || null),
+    user: safeHeaderValue(input.user === undefined ? current.user : input.user, null),
     pass,
-    from: input.from === undefined ? current.from : (pickString(input.from, '') || null),
+    from: safeHeaderValue(input.from === undefined ? current.from : input.from, null),
     to,
     events,
     longTaskMs,
     enabled: input.enabled === undefined ? current.enabled : input.enabled !== false,
-    helloName: input.helloName === undefined ? current.helloName : (pickString(input.helloName, '') || 'workbench.local'),
+    helloName: safeHeaderValue(input.helloName === undefined ? current.helloName : input.helloName, 'workbench.local'),
   };
 }
 
@@ -273,7 +282,7 @@ function buildMessage(config, job) {
     'Sent by Workbench.',
   ].join('\n');
   return [
-    `From: ${config.from}`,
+    `From: ${encodeHeader(config.from)}`,
     `To: ${config.to.join(', ')}`,
     `Subject: ${encodeHeader(`[Workbench] ${job.title || 'Notification'}`)}`,
     `Date: ${new Date().toUTCString()}`,

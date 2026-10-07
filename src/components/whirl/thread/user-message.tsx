@@ -18,7 +18,7 @@ export function UserMessage({ message }: { message: Message }) {
             part.mime?.startsWith('image/') && part.url
               ? (
                 <a key={part.id} href={part.url} target="_blank" rel="noreferrer" className="block">
-                  <img src={part.url} alt={part.filename || 'Attached image'} className="max-h-64 max-w-full rounded-2xl object-contain shadow-[inset_0_0_0_1px_var(--well-outline)]" loading="lazy" />
+                  <img src={part.url} alt={part.filename || 'Attached image'} className="max-h-64 max-w-full rounded-xl object-contain shadow-[inset_0_0_0_1px_var(--well-outline)]" loading="lazy" />
                 </a>
               )
               : <span key={part.id} className="rounded-full bg-well px-3 py-1.5 text-[13px] text-muted-foreground shadow-[inset_0_0_0_1px_var(--well-outline)]">{part.filename || 'Attached file'}</span>
@@ -26,7 +26,7 @@ export function UserMessage({ message }: { message: Message }) {
         </div>
       )}
       {text.length > 0 && (
-        <div className="min-w-0 max-w-[85%] rounded-[20px] rounded-br-md bg-well px-3.5 py-2 text-[15px]/6 break-words whitespace-pre-wrap [overflow-wrap:anywhere] shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
+        <div className="min-w-0 max-w-[85%] rounded-xl rounded-br-md bg-well px-3.5 py-2 text-[15px]/6 break-words whitespace-pre-wrap [overflow-wrap:anywhere] shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
           {text}
         </div>
       )}

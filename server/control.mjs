@@ -1,19 +1,25 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { DatabaseSync } from 'node:sqlite';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, statfsSync } from 'node:fs';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store, uid, decode, fail, canonical, normalizeStatus, RUN_CAPACITY, RUN_LIVE, RUN_TERMINAL } from './store.mjs';
+import { Store, uid, decode, fail, canonical, normalizeStatus, RUN_LIVE, RUN_TERMINAL } from './store.mjs';
 import { OpenCodeRuntime, PiRuntime, CAPABILITIES } from './runtimes.mjs';
 import { generateTitle } from './titles.mjs';
-import { createWorktree, worktreeChanges, applyWorktree, discardWorktree, isGitRepo, worktreeRoot } from './workspaces.mjs';
+import { createWorktree, worktreeChanges, applyWorktree, discardWorktree, isGitRepo, worktreeRoot, git } from './workspaces.mjs';
 import { pacing, listLimits, upsertLimit, removeLimit } from './usage-limits.mjs';
 import { createNotification, listNotifications, markNotificationRead, markAllNotificationsRead } from './notifications.mjs';
 import { createSmtpMailer, publicSmtpConfig, saveSmtpConfig } from './smtp.mjs';
+import { createScheduler } from './scheduler.mjs';
+import { streamEvents } from './event-stream.mjs';
+import { safePart, createMessageWriter } from './messages.mjs';
+import { openLegacy, maintenance } from './legacy.mjs';
+import { describeFailure, RETRYABLE_CODES, retryDelay } from './failures.mjs';
+import { matchesSecret } from '../shared/auth.mjs';
+import { insideDir, resolvedPath } from './security.mjs';
 
 const execFileAsync = (command, args, options) => new Promise((resolve) => {
   execFile(command, args, { timeout: 5000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => resolve({ error, stdout: stdout || '', stderr: stderr || '' }));
@@ -71,16 +77,16 @@ if (!key) throw new Error('WORKBENCH_PROXY_KEY is required.');
 const store = new Store(CONTROL);
 const oc = new OpenCodeRuntime({ dataDir: CONTROL });
 const pi = new PiRuntime({ dataDir: CONTROL });
-let legacy;
-try {
-  legacy = new DatabaseSync(process.env.WORKBENCH_LEGACY_DB || path.join(HOME, '.local/share/opencode/opencode.db'), { readOnly: true });
-  legacy.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=1000;');
-} catch {}
+const legacy = openLegacy(process.env.WORKBENCH_LEGACY_DB || path.join(HOME, '.local/share/opencode/opencode.db'));
 
 const MIN_RUNS = 1;
 const MAX_RUNS_LIMIT = 8;
 const DEFAULT_MAX_RUNS = Math.max(MIN_RUNS, Math.min(MAX_RUNS_LIMIT, Math.floor(Number(process.env.WORKBENCH_MAX_RUNS || 2)) || 2));
-const MIN_FREE_MB = Math.max(64, Number(process.env.WORKBENCH_MIN_FREE_MB || 256));
+const MIN_FREE_MB = Math.max(64, Number(process.env.WORKBENCH_MIN_FREE_MB) || 256);
+/* Rough memory a run needs. The scheduler only starts a run when there is
+   MIN_FREE_MB + MEM_PER_RUN_MB available, which keeps effective concurrency
+   bounded by RAM rather than only by the maxRuns setting. */
+const MEM_PER_RUN_MB = Math.max(128, Number(process.env.WORKBENCH_MB_PER_RUN) || 512);
 
 /* Concurrency limit is resolved at scheduling time (§11): a persisted
    `settings.maxRuns` wins, the environment variable provides the process
@@ -92,7 +98,6 @@ function maxRuns() {
   return DEFAULT_MAX_RUNS;
 }
 
-let scheduling = false;
 let shuttingDown = false;
 let catalogRefresh = null;
 let lastCatalog = 0;
@@ -105,58 +110,16 @@ const runs = new Map();
    `smtp.host` is configured. Errors only downgrade `notifications.delivery`. */
 const mailer = createSmtpMailer(store);
 mailer.start();
-store.listeners.add((event) => { try { if (event?.type === 'notification.created') mailer.enqueue(event); } catch {} });
+store.listeners.add((event) => { if (event?.type === 'notification.created') mailer.enqueue(event); });
 
 const WORKTREES = worktreeRoot();
 const GLOBAL_AGENTS = path.join(HOME, '.config/workbench/AGENTS.md');
 
 /* ---- Run lifecycle helpers (PLAN §4/§9/§16) ---- */
 
-/* Specific, user-readable failure codes (§40). Codes are inferred only from
-   the runtime's own error text — we never invent a provider diagnosis — and are
-   persisted on the command so a reload shows the same reason. */
-const FAILURE_MESSAGES = {
-  model_unavailable: 'The selected model is not available for this provider. Pick another model and retry.',
-  provider_unavailable: 'The model provider is temporarily unavailable. Retry in a moment or switch models.',
-  provider_rate_limit: 'The provider rate limit or quota was reached. Wait a little, then retry or switch models.',
-  provider_auth: 'The provider rejected the credentials (401/403). Reconnect the API key and retry.',
-  context_limit: 'The request exceeded the model context window. Start a new chat, reduce the input, or switch to a larger-context model.',
-  worker_crashed: 'The worker process running this task exited unexpectedly. Retry to start a fresh worker.',
-  pi_failure: 'The Pi agent harness reported a failure. Retry, and check the model connection if it repeats.',
-  command_failed: 'A shell command run by the agent failed. Review the command output, then retry.',
-  git_conflict: 'Git could not apply the changes because of a conflict. Resolve the conflicting files and retry.',
-  permission_denied: 'The agent was denied access to a file or resource.',
-  attachment_failed: 'An attachment could not be read or sent.',
-  network_error: 'A network request failed. Check connectivity and retry.',
-  restart_interrupted: 'The control plane restarted while this task was running. The recorded work is preserved; review it before continuing.',
-};
-
-function classifyFailure(message) {
-  const text = String(message || '').toLowerCase();
-  if (!text) return null;
-  const has = (...needles) => needles.some((needle) => text.includes(needle));
-  if (has('401', '403', 'unauthorized', 'invalid api key', 'invalid_api_key', 'not authenticated', 'authentication', 'api key is invalid', 'permission denied by provider')) return 'provider_auth';
-  if (has('rate limit', 'rate_limit', 'ratelimit', 'too many requests', '429', 'quota exceeded', 'quota reached', 'resource_exhausted')) return 'provider_rate_limit';
-  if (has('context length', 'context_length', 'context window', 'maximum context', 'too many tokens', 'token limit', 'max_tokens', 'prompt is too long', 'exceeds the maximum')) return 'context_limit';
-  if (has('model not found', 'model_not_found', 'no such model', 'unknown model', 'model does not exist', 'does not exist', 'is not available', 'not available for', 'unsupported model', 'does not support')) return 'model_unavailable';
-  if (has('merge conflict', 'git conflict', 'conflict', 'could not apply', 'patch does not apply', 'does not apply cleanly')) return 'git_conflict';
-  if (has('eacces', 'eperm', 'permission denied', 'operation not permitted', 'not permitted')) return 'permission_denied';
-  if (has('attachment', 'attach file', 'upload failed')) return 'attachment_failed';
-  if (has('econnrefused', 'econnreset', 'enotfound', 'etimedout', 'eai_again', 'fetch failed', 'socket hang up', 'network error', 'connection refused', 'dns lookup', 'timed out', 'timeout')) return 'network_error';
-  if (has('runner exited', 'runtime exited', 'could not start', 'child process', 'process exited', 'was killed', 'sigkill', 'sigterm', 'crashed', 'segmentation')) return 'worker_crashed';
-  if (has('502', '503', '504', 'bad gateway', 'service unavailable', 'gateway timeout', 'overloaded', 'provider is down')) return 'provider_unavailable';
-  if (has('pi runner', 'pi agent', 'pi model', 'pi failure', 'pi harness', 'pi failed')) return 'pi_failure';
-  if (has('exit code', 'non-zero', 'command failed', 'command exited', 'shell command')) return 'command_failed';
-  if (has('interrupted_by_restart', 'control plane restarted', 'control plane stopped')) return 'restart_interrupted';
-  return null;
-}
-
-function describeFailure(error) {
-  const raw = String(error?.message || error || 'The task failed.').trim() || 'The task failed.';
-  if (error?.cancelled) return { code: null, message: raw };
-  const code = classifyFailure(raw);
-  return { code, message: code ? FAILURE_MESSAGES[code] : raw };
-}
+/* Failure classification and the retry policy live in ./failures.mjs so the
+   same rules are unit-tested and reused (PLAN §40). */
+const MAX_RUN_RETRIES = Math.max(0, Math.min(6, Math.floor(Number(process.env.WORKBENCH_MAX_RETRIES ?? 3)) || 0));
 
 function emitTyped(conversationId, runId, type, payload = {}) {
   return store.event(type, conversationId, { ...payload, runId }, { kind: type, runId });
@@ -185,18 +148,7 @@ function setRunPhase(run, status, extra = {}) {
 }
 
 function runCapacityCount() {
-  let count = 0;
-  for (const run of runs.values()) if (RUN_CAPACITY.includes(run.phase)) count += 1;
-  return count;
-}
-
-function workspaceLeased(directory, exceptConversation = null) {
-  for (const run of runs.values()) {
-    if (run.conversation.id === exceptConversation) continue;
-    if (run.conversation.directory === directory) return true;
-    if (run.worktree?.path && run.worktree.path === directory) return true;
-  }
-  return false;
+  return runs.size;
 }
 
 function registerInteraction(run, id, kind, data) {
@@ -461,6 +413,12 @@ function defaultModel(engine, projectId) {
 }
 const withCapabilities = (session) => ({ ...session, capabilities: CAPABILITIES[session.engine] || {} });
 
+/* A queued follow-up admitted by the scheduler reuses the same worktree, so a
+   durable apply/discard must treat it as busy until it leaves the queue. */
+function conversationBusy(conversationId) {
+  return !!store.db.prepare(`SELECT 1 FROM commands WHERE conversation_id=? AND status IN ('queued',${RUN_LIVE.map(() => '?').join(',')}) LIMIT 1`).get(conversationId, ...RUN_LIVE);
+}
+
 /* ---- AGENTS.md (PLAN §1.10) ---- */
 
 const AGENTS_FILENAME = 'AGENTS.md';
@@ -476,7 +434,8 @@ function agentsFileList(root, target) {
   try { base = canonical(root); } catch { return list; }
   list.push({ scope: 'project', path: path.join(base, AGENTS_FILENAME), label: 'Project root' });
   if (target) {
-    const current = path.resolve(target);
+    // A relative `path` is project-relative, not control-CWD-relative.
+    const current = path.resolve(base, target);
     if (current !== base && current.startsWith(`${base}${path.sep}`)) {
       let walk = base;
       for (const part of path.relative(base, current).split(path.sep).filter(Boolean)) {
@@ -510,49 +469,7 @@ async function projectInstructions(conversation) {
 
 /* ---- Message persistence ---- */
 
-function safePart(part, conversationId) {
-  if (part.type === 'reasoning') return { id: part.id, type: 'reasoning' };
-  if (part.type === 'file') {
-    return {
-      id: part.id, type: 'file', mime: part.mime, filename: part.filename,
-      url: String(part.url || '').startsWith('data:') ? `/api/v2/conversations/${conversationId}/files/${part.id}`
-        : String(part.url || '').startsWith('/api/') ? part.url : '',
-    };
-  }
-  if (part.type === 'tool') {
-    const state = part.state || {};
-    const artifactId = `tool_${part.id}`;
-    const details = JSON.stringify({ input: state.input, output: state.output, error: state.error });
-    if (details !== '{}') {
-      store.db.prepare('INSERT INTO artifacts(id,conversation_id,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE length(excluded.data) >= length(artifacts.data) OR length(artifacts.data) < 2').run(artifactId, conversationId, details.slice(0, 2_000_000));
-    }
-    return { id: part.id, type: 'tool', tool: part.tool, callID: part.callID, artifactId, state: { status: state.status, title: state.title, time: state.time } };
-  }
-  return { id: part.id, type: part.type, text: typeof part.text === 'string' ? part.text.slice(0, 120000) : undefined };
-}
-
-function persistMessage(conversationId, commandId, message) {
-  const m = modelInfo(`${message.info.providerID}/${message.info.modelID}`, store.conversation(conversationId).engine);
-  const info = {
-    role: message.info.role,
-    providerID: message.info.providerID,
-    modelID: message.info.modelID,
-    modelName: m?.name || message.info.modelName,
-    contextLimit: m?.contextLimit || message.info.contextLimit,
-    tokens: message.info.tokens,
-    cost: message.info.cost,
-  };
-  const normalized = { ...message, info, parts: message.parts.map((part) => safePart(part, conversationId)) };
-  /* Empty assistant frames (no prose, no tools, no files, no error) are noise
-     in the transcript — skip them instead of persisting blanks. */
-  if (info.role === 'assistant'
-    && !message.info.error
-    && !normalized.parts.some((part) => (part.type === 'text' && String(part.text || '').trim()) || part.type === 'tool' || part.type === 'file')) {
-    return;
-  }
-  store.message(conversationId, normalized, commandId);
-  store.recordUsage(message.id, conversationId, commandId, info);
-}
+const persistMessage = createMessageWriter({ store, blobs: BLOBS, modelInfo });
 
 /* ---- Title jobs ---- */
 
@@ -746,7 +663,7 @@ function reconcileRecordedRuns() {
     let complete = false;
     for (const row of messages) {
       const info = decode(row.data, {});
-      const parts = legacy.prepare('SELECT id,data FROM message WHERE id=? ORDER BY time_created,id').all(row.id)
+      const parts = legacy.prepare('SELECT id,data FROM part WHERE message_id=? ORDER BY time_created,id').all(row.id)
         .map((part) => ({ ...decode(part.data, {}), id: part.id }));
       persistMessage(command.conversation_id, command.id, { id: row.id, created: row.time_created, info, parts });
       if (info.time?.completed && info.finish && !['tool-calls', 'unknown'].includes(info.finish) && !info.error) complete = true;
@@ -757,43 +674,43 @@ function reconcileRecordedRuns() {
 
 /* ---- Scheduler ---- */
 
-function availableBytes() {
-  try {
-    return Number(readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)/m)?.[1] || 0) * 1024;
-  } catch {
-    return os.freemem();
-  }
-}
-/* A mutating Pi build run in a Git project is isolated in a worktree (§12).
+/* A build run in a Git project is isolated in a worktree.
    Read-only/plan runs and General chats run directly (§13). */
 function shouldIsolate(conversation) {
-  return conversation.engine === 'pi' && conversation.mode === 'build' && !!conversation.project_id;
+  return conversation.mode === 'build';
 }
 
 async function ensureWorktree(conversation, runId) {
   const p = store.projects().find((candidate) => candidate.id === conversation.project_id);
-  if (!p) return null;
-  const root = canonical(p.directory);
-  if (!(await isGitRepo(root))) return null;
+  const selected = canonical(conversation.directory);
+  if (!(await isGitRepo(selected))) return null;
+  const top = await git(['-C', selected, 'rev-parse', '--show-toplevel']);
+  if (top.error) throw fail('Could not resolve the Git checkout.', 409);
+  const root = canonical(top.stdout.trim());
+  const relative = path.relative(root, selected);
   const existing = store.db.prepare("SELECT * FROM worktrees WHERE conversation_id=? AND status IN ('active','conflict') ORDER BY created DESC LIMIT 1").get(conversation.id);
   if (existing && existsSync(existing.path)) {
+    if (existing.root_directory && existing.root_directory !== root) throw fail('Recorded worktree belongs to another checkout; apply or discard it before continuing.', 409);
     store.db.prepare('UPDATE worktrees SET run_id=?, updated=? WHERE id=?').run(runId, Date.now(), existing.id);
-    return { id: existing.id, path: existing.path, branch: existing.branch, baseBranch: existing.base_branch, baseCommit: existing.base_commit, root };
+    return { id: existing.id, path: existing.path, cwd: path.join(existing.path, relative), branch: existing.branch, baseBranch: existing.base_branch, baseCommit: existing.base_commit, root };
   }
-  const worktree = await createWorktree({ projectId: p.id, conversationId: conversation.id, runId, root });
+  const worktree = await createWorktree({ projectId: p?.id || 'general', conversationId: conversation.id, runId, root });
   store.db.prepare('INSERT INTO worktrees(id,project_id,conversation_id,run_id,path,branch,base_branch,base_commit,status,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .run(worktree.id, p.id, conversation.id, runId, worktree.path, worktree.branch, worktree.baseBranch, worktree.baseCommit, 'active', Date.now(), Date.now());
-  return worktree;
+    .run(worktree.id, p?.id || null, conversation.id, runId, worktree.path, worktree.branch, worktree.baseBranch, worktree.baseCommit, 'active', Date.now(), Date.now());
+  store.db.prepare('UPDATE worktrees SET root_directory=? WHERE id=?').run(root, worktree.id);
+  return { ...worktree, cwd: path.join(worktree.path, relative) };
 }
 
 function startRun(command) {
   const conversation = store.conversation(command.conversation_id);
   const runtime = conversation.engine === 'pi' ? pi : oc;
-  const run = { command, conversation, runtime, cancelled: false, waiting: false, phase: 'queued', previousPhase: null, started: Date.now(), heartbeat: Date.now(), worktree: null };
+  const run = { command, conversation, runtime, cancelled: false, waiting: false, phase: 'queued', previousPhase: null, admittedAt: Date.now(), started: Date.now(), heartbeat: Date.now(), worktree: null, workspaceDir: conversation.directory, workspaceKind: 'inplace' };
+  store.transaction(() => {
+    store.db.prepare('UPDATE commands SET engine=?, provider=?, heartbeat=? WHERE id=?')
+      .run(conversation.engine, modelInfo(command.model, conversation.engine)?.provider || null, Date.now(), command.id);
+    setRunPhase(run, 'starting');
+  });
   runs.set(conversation.id, run);
-  store.db.prepare('UPDATE commands SET engine=?, provider=?, heartbeat=? WHERE id=?')
-    .run(conversation.engine, modelInfo(command.model, conversation.engine)?.provider || null, Date.now(), command.id);
-  setRunPhase(run, 'starting');
   void (async () => {
     let baseline = null;
     let runtimeConversation = conversation;
@@ -806,22 +723,20 @@ function startRun(command) {
         throw fail('Selected model does not accept images. Choose a vision model.');
       }
       if (shouldIsolate(conversation)) {
-        try {
-          const worktree = await ensureWorktree(conversation, command.id);
-          if (worktree) {
-            run.worktree = worktree;
-            runtimeConversation = { ...conversation, directory: worktree.path, root_directory: conversation.directory };
-            store.db.prepare('UPDATE commands SET worktree_id=? WHERE id=?').run(worktree.id, command.id);
-            emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: worktree.id, files: [] });
-          }
-        } catch (error) {
-          emitTyped(conversation.id, command.id, 'run.warning', { message: `Worktree isolation unavailable, running in place: ${error.message}` });
+        const worktree = await ensureWorktree(conversation, command.id);
+        if (worktree) {
+          run.worktree = worktree;
+          run.workspaceDir = worktree.cwd;
+          run.workspaceKind = 'worktree';
+          runtimeConversation = { ...conversation, directory: worktree.cwd, root_directory: worktree.root };
+          store.db.prepare('UPDATE commands SET worktree_id=? WHERE id=?').run(worktree.id, command.id);
+          emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: worktree.id, files: [] });
         }
       }
-      if (!run.worktree) baseline = await captureBaseline(conversation.directory);
+      if (!run.worktree) baseline = await captureBaseline(run.workspaceDir);
       const handoff = !conversation.native_id ? store.getSetting(`handoff.${conversation.id}`) : null;
       let context = '';
-      try { context = await projectInstructions(runtimeConversation); } catch {}
+      try { context = await projectInstructions(runtimeConversation); } catch (error) { console.warn(JSON.stringify({ event: 'instructions_failed', runId: command.id, message: error.message })); }
       /* AGENTS.md instructions ride along as command context; because the Pi
          runner does not yet consume `context`, they are also prepended to the
          prompt so they actually reach the model. The stored user message keeps
@@ -829,31 +744,44 @@ function startRun(command) {
       const prefix = context.trim() ? `Project instructions (AGENTS.md) that apply to this request:\n${context.trim()}\n\n---\n\n` : '';
       const baseText = handoff ? `Previous conversation context (reference only):\n${handoff}\n\nCurrent request:\n${input.text}` : input.text;
       const runtimeCommand = { ...command, input: JSON.stringify({ ...input, text: `${prefix}${baseText}` }), context, instructions: context };
+      if (run.cancelled) throw Object.assign(new Error('Run cancelled before dispatch.'), { cancelled: true });
       await runtime.run(runtimeConversation, runtimeCommand, attachments, runtimeHooks(run, command, conversation));
       if (run.cancelled) {
         setRunPhase(run, 'cancelled');
       } else {
-        setRunPhase(run, 'completed');
-        createNotification(store, { kind: 'run.completed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” finished`, severity: 'success' });
-        void (async () => {
-          try {
-            const summary = run.worktree ? await worktreeChanges(run.worktree) : await summarizeChanges(conversation.directory, baseline);
-            if (summary) {
-              store.db.prepare('INSERT OR REPLACE INTO artifacts VALUES (?,?,?)').run(`changes_${command.id}`, conversation.id, JSON.stringify(summary));
-              if (run.worktree) emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: run.worktree.id, files: summary.files });
-            }
-          } catch {}
-          await maybeGenerateTitle(conversation.id).catch(() => {});
-        })();
+        // Finish Git inspection before admitting a follow-up in this worktree.
+        try {
+          const summary = run.worktree ? await worktreeChanges(run.worktree) : await summarizeChanges(run.workspaceDir, baseline);
+          if (summary) {
+            store.db.prepare('INSERT OR REPLACE INTO artifacts VALUES (?,?,?)').run(`changes_${command.id}`, conversation.id, JSON.stringify(summary));
+            if (run.worktree) emitTyped(conversation.id, command.id, 'git.diff.updated', { worktreeId: run.worktree.id, files: summary.files });
+          }
+        } catch (error) { console.warn(JSON.stringify({ event: 'changes_failed', runId: command.id, message: error.message })); }
+        setRunPhase(run, run.cancelled ? 'cancelled' : 'completed');
+        if (!run.cancelled) createNotification(store, { kind: 'run.completed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” finished`, severity: 'success' });
+        void maybeGenerateTitle(conversation.id).catch(error => console.warn(JSON.stringify({ event: 'title_failed', conversationId: conversation.id, message: error.message })));
       }
     } catch (error) {
       if (run.cancelled) {
         setRunPhase(run, 'cancelled', { error: null, failureCode: null });
       } else {
         const failure = describeFailure(error);
-        setRunPhase(run, 'failed', { error: failure.message, failureCode: failure.code });
-        createNotification(store, { kind: 'run.failed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” failed`, body: failure.message, severity: 'error' });
-        console.warn(JSON.stringify({ event: 'run_failed', conversationId: conversation.id, runId: command.id, failureCode: failure.code, message: String(error?.message || error).slice(0, 500) }));
+        const attempts = Number(store.db.prepare('SELECT attempts FROM commands WHERE id=?').get(command.id)?.attempts || 0);
+        if (!shuttingDown && failure.code && RETRYABLE_CODES.has(failure.code) && attempts < MAX_RUN_RETRIES) {
+          /* Transient provider/network failure: requeue with exponential backoff
+             instead of ending the run and pausing the conversation. */
+          const attempt = attempts + 1;
+          const delay = retryDelay(attempt);
+          store.retry(command.id, attempt, Date.now() + delay);
+          emitTyped(conversation.id, command.id, 'run.retry', { attempt, delayMs: delay, failureCode: failure.code, error: failure.message });
+          console.warn(JSON.stringify({ event: 'run_retry', conversationId: conversation.id, runId: command.id, attempt, delayMs: delay, failureCode: failure.code, message: String(error?.message || error).slice(0, 300) }));
+          const timer = setTimeout(() => { if (!shuttingDown) void tick(); }, delay + 50);
+          timer.unref?.();
+        } else {
+          setRunPhase(run, 'failed', { error: failure.message, failureCode: failure.code });
+          createNotification(store, { kind: 'run.failed', conversationId: conversation.id, runId: command.id, title: `“${conversation.title}” failed`, body: failure.message, severity: 'error' });
+          console.warn(JSON.stringify({ event: 'run_failed', conversationId: conversation.id, runId: command.id, failureCode: failure.code, message: String(error?.message || error).slice(0, 500) }));
+        }
       }
     } finally {
       runs.delete(conversation.id);
@@ -862,25 +790,8 @@ function startRun(command) {
   })();
 }
 
-async function tick() {
-  if (scheduling || shuttingDown) return;
-  scheduling = true;
-  try {
-    if (availableBytes() < MIN_FREE_MB * 1024 * 1024) return;
-    while (runCapacityCount() < maxRuns()) {
-      const candidates = store.db.prepare("SELECT c.* FROM commands c JOIN conversations s ON s.id=c.conversation_id WHERE c.status='queued' AND s.paused=0 ORDER BY c.created,c.id LIMIT 25").all();
-      const command = candidates.find((candidate) => {
-        if (runs.has(candidate.conversation_id)) return false;
-        const conversation = store.conversation(candidate.conversation_id);
-        return !workspaceLeased(conversation.directory, candidate.conversation_id);
-      });
-      if (!command) break;
-      startRun(command);
-    }
-  } finally {
-    scheduling = false;
-  }
-}
+const { tick, metrics: schedulerMetrics } = createScheduler({ store, runs, startRun, maxRuns,
+  reserveMB: MIN_FREE_MB, perRunMB: MEM_PER_RUN_MB, stopping: () => shuttingDown });
 
 /* ---- Attachments and clips ---- */
 
@@ -1044,40 +955,7 @@ async function body(req, max = 256000) {
   return result;
 }
 function authenticate(req) {
-  const received = Buffer.from(String(req.headers['x-workbench-internal-key'] || ''));
-  const expected = Buffer.from(key);
-  return received.length === expected.length && timingSafeEqual(received, expected);
-}
-
-function streamEvents(req, res, url) {
-  let cursor = Number(req.headers['last-event-id'] || url.searchParams.get('after') || 0);
-  if (!Number.isSafeInteger(cursor) || cursor < 0) throw fail('Invalid event cursor.');
-  const latest = store.sequence();
-  const oldest = store.db.prepare('SELECT min(seq) AS seq FROM events').get().seq || 0;
-  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-  res.flushHeaders();
-  const send = (event) => {
-    if (event.seq <= cursor) return;
-    cursor = event.seq;
-    /* Backpressure must not drop the client: Node buffers the bounded
-       replay (<=501 events) and slow clients are expired after 10 minutes. */
-    res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
-  };
-  if (cursor > latest || (cursor > 0 && cursor < oldest - 1)) {
-    res.write(`id: ${latest}\ndata: ${JSON.stringify({ type: 'resync', seq: latest })}\n\n`);
-    cursor = latest;
-  }
-  const rows = store.db.prepare('SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT 501').all(cursor);
-  if (rows.length > 500) {
-    res.write(`id: ${latest}\ndata: ${JSON.stringify({ type: 'resync', seq: latest })}\n\n`);
-    cursor = latest;
-  } else {
-    for (const row of rows) send({ seq: row.seq, type: row.type, kind: row.kind || row.type, conversationId: row.conversation_id, runId: row.run_id || null, ...decode(row.data, {}) });
-  }
-  store.listeners.add(send);
-  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20000);
-  const expiry = setTimeout(() => res.end(), 10 * 60 * 1000);
-  res.on('close', () => { store.listeners.delete(send); clearInterval(heartbeat); clearTimeout(expiry); });
+  return matchesSecret(req.headers['x-workbench-internal-key'], key);
 }
 
 async function upload(req, res, url) {
@@ -1110,16 +988,17 @@ async function upload(req, res, url) {
 }
 
 async function routes(req, res) {
-  if (!authenticate(req)) return json(res, 403, { error: 'Forbidden.' });
+  if (!(await authenticate(req))) return json(res, 403, { error: 'Forbidden.' });
   const url = new URL(req.url, 'http://localhost');
   const route = url.pathname.replace(/^\/api\/v2/, '');
   const method = req.method;
 
-  if (route === '/health') return json(res, 200, { ok: true, version: 3, runs: [...runs.values()].map((run) => ({ conversationId: run.conversation.id, commandId: run.command.id, phase: run.phase, waiting: run.waiting, worktreeId: run.worktree?.id || null })), maxRuns: maxRuns(), active: runCapacityCount(), queued: store.queued(), worktrees: WORKTREES });
-  if (route === '/events' && method === 'GET') return streamEvents(req, res, url);
+  if (route === '/health') return json(res, 200, { ok: true, version: 3, runs: [...runs.values()].map((run) => ({ conversationId: run.conversation.id, commandId: run.command.id, phase: run.phase, waiting: run.waiting, worktreeId: run.worktree?.id || null })), maxRuns: maxRuns(), active: runCapacityCount(), queued: store.queued(), worktrees: WORKTREES,
+    metrics: { scheduler: schedulerMetrics, store: store.metrics, events: store.db.prepare('SELECT count(*) AS n FROM events').get().n, listeners: store.listeners.size, memory: process.memoryUsage(), uptime: process.uptime() } });
+  if (route === '/events' && method === 'GET') return streamEvents(store, req, res, url);
 
   if (route === '/bootstrap' && method === 'GET') {
-    syncLegacySessions();
+    maintenance('legacy_sync', () => syncLegacySessions());
     const list = store.list({ limit: 60 });
     return json(res, 200, {
       ...list,
@@ -1132,6 +1011,7 @@ async function routes(req, res) {
       defaultEngine: 'pi',
       capabilities: CAPABILITIES,
       maxRuns: maxRuns(),
+      openTabs: store.getSetting('openTabs', null),
       active: runCapacityCount(),
       queued: store.queued(),
       worktrees: WORKTREES,
@@ -1150,15 +1030,21 @@ async function routes(req, res) {
   if (projectMatch && method === 'DELETE') {
     const p = project(projectMatch[1]);
     /* Best-effort cleanup of any isolated worktrees before the project row goes
-       away; the user's original checkout is never touched. */
+       away; the user's original checkout is never touched. Discard against the
+       checkout the worktree was recorded from and keep the row when removal
+       fails so the directory is not leaked. */
     for (const row of store.db.prepare('SELECT * FROM worktrees WHERE project_id=?').all(p.id)) {
-      await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, p.directory).catch(() => {});
+      try {
+        await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, row.root_directory || p.directory);
+        store.db.prepare('DELETE FROM worktrees WHERE id=?').run(row.id);
+      } catch (error) {
+        console.warn(JSON.stringify({ event: 'project_worktree_cleanup_failed', projectId: p.id, worktreeId: row.id, message: error.message }));
+      }
     }
     store.transaction(() => {
       store.db.prepare('UPDATE conversations SET project_id=NULL WHERE project_id=?').run(p.id);
       store.db.prepare('UPDATE clips SET project_id=NULL WHERE project_id=?').run(p.id);
       store.db.prepare('DELETE FROM workspaces WHERE project_id=?').run(p.id);
-      store.db.prepare('DELETE FROM worktrees WHERE project_id=?').run(p.id);
       store.db.prepare('DELETE FROM projects WHERE id=?').run(p.id);
       store.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`project.${p.id}.%`);
       store.event('projects.changed', null);
@@ -1200,6 +1086,7 @@ async function routes(req, res) {
       queued: store.queued(),
       defaults: { opencode: defaultModel('opencode'), pi: defaultModel('pi') },
       favorites: store.getSetting('favorites', []),
+      openTabs: store.getSetting('openTabs', null),
       smtp: publicSmtpConfig(store),
     });
   }
@@ -1211,6 +1098,15 @@ async function routes(req, res) {
       store.setSetting(`default.${engine}`, b.defaultModel);
     }
     if (Array.isArray(b.favorites)) store.setSetting('favorites', b.favorites.filter((value) => typeof value === 'string').slice(0, 100));
+    if (b.openTabs !== undefined) {
+      /* Cross-device working set. Tolerant of unknown
+         ids: the client reconciles them on bootstrap. */
+      const tabs = b.openTabs || {};
+      const order = (Array.isArray(tabs.order) ? tabs.order : []).filter((value) => typeof value === 'string' && value).slice(0, 64);
+      const pinned = (Array.isArray(tabs.pinned) ? tabs.pinned : []).filter((value) => typeof value === 'string' && order.includes(value));
+      const activeId = typeof tabs.activeId === 'string' && order.includes(tabs.activeId) ? tabs.activeId : null;
+      store.setSetting('openTabs', { order, pinned, activeId });
+    }
     if (b.maxRuns !== undefined) {
       const value = Number(b.maxRuns);
       if (!Number.isInteger(value) || value < MIN_RUNS || value > MAX_RUNS_LIMIT) throw fail(`maxRuns must be an integer between ${MIN_RUNS} and ${MAX_RUNS_LIMIT}.`);
@@ -1222,6 +1118,9 @@ async function routes(req, res) {
     if (b.smtp !== undefined) {
       saveSmtpConfig(store, b.smtp);
       store.event('settings.changed', null, { smtp: true }, { kind: 'settings.changed' });
+    }
+    if (b.defaultModel === undefined && b.favorites === undefined && b.maxRuns === undefined && b.smtp === undefined) {
+      return json(res, 200, { ok: true, maxRuns: maxRuns(), smtp: publicSmtpConfig(store) });
     }
     store.event('models.changed', null);
     return json(res, 200, { ok: true, maxRuns: maxRuns(), smtp: publicSmtpConfig(store) });
@@ -1242,7 +1141,7 @@ async function routes(req, res) {
     } else {
       await oc.request(`/auth/${encodeURIComponent(b.provider)}`, { type: 'api', key: b.apiKey }, undefined, 30000, 'PUT');
     }
-    void refreshCatalog();
+    void refreshCatalog().catch(() => {});
     return json(res, 200, { connected: true });
   }
   if (route === '/connections/oauth/start' && method === 'POST') {
@@ -1258,7 +1157,7 @@ async function routes(req, res) {
     const b = await body(req);
     if (!/^[a-z0-9._-]{1,80}$/.test(b.provider || '') || !Number.isSafeInteger(b.authMethod)) throw fail('Invalid authorization.');
     await oc.request(`/provider/${b.provider}/oauth/callback`, { method: b.authMethod, ...(b.code ? { code: String(b.code).slice(0, 8192) } : {}) }, undefined, 120000);
-    void refreshCatalog();
+    void refreshCatalog().catch(() => {});
     return json(res, 200, { connected: true });
   }
 
@@ -1272,9 +1171,10 @@ async function routes(req, res) {
     /* Pi is the default engine; OpenCode remains available as an explicit,
        advanced adapter (PLAN §1.1). */
     const engine = b.engine === 'opencode' ? 'opencode' : 'pi';
-    const p = project(b.projectId);
-    if (b.workspace && (!p || ![p.directory, ...(p.workspaces || [])].includes(b.workspace))) throw fail('Choose a workspace belonging to this project.');
-    const directory = p ? canonical(b.workspace || p.directory) : GENERAL;
+    const requestedProject = project(b.projectId);
+    const directory = canonical(b.workspace || b.directory || requestedProject?.directory || GENERAL);
+    const p = store.projectFor(directory);
+    if (requestedProject && p?.id !== requestedProject.id) throw fail('Choose a workspace belonging to this project.');
     const id = b.id || uid('chat_');
     if (!/^[\w-]{8,100}$/.test(id)) throw fail('Invalid conversation ID.');
     const existing = store.db.prepare('SELECT * FROM conversations WHERE id=?').get(id);
@@ -1293,9 +1193,13 @@ async function routes(req, res) {
   if (promptsMatch && method === 'GET') {
     const c = store.conversation(promptsMatch[1]);
     const byId = new Map();
-    for (const row of store.db.prepare('SELECT id,created,data FROM messages WHERE conversation_id=? ORDER BY created,id').all(c.id)) {
+    /* Only user turns are needed, and the newest window is enough for the
+       prompt navigation list; filtering in SQL avoids decoding every row. */
+    const promptRows = store.db.prepare(`SELECT id,created,data FROM messages
+      WHERE conversation_id=? AND json_extract(data,'$.info.role')='user'
+      ORDER BY created DESC,id DESC LIMIT 500`).all(c.id);
+    for (const row of promptRows) {
       const message = decode(row.data, {});
-      if (message?.info?.role !== 'user') continue;
       const text = (message.parts || []).filter((part) => part.type === 'text').map((part) => part.text || '').join(' ').replace(/\s+/g, ' ').trim();
       byId.set(message.id, { id: message.id, preview: text.slice(0, 100), created: row.created });
     }
@@ -1341,13 +1245,36 @@ async function routes(req, res) {
     if (method === 'GET') return json(res, 200, { session: withCapabilities(store.view(c, messagesPage(c, url.searchParams.get('before')))) });
     if (method === 'DELETE') {
       if (runs.has(c.id)) throw fail('Stop the running agent before deleting this conversation.', 409);
+      for (const row of store.db.prepare("SELECT * FROM worktrees WHERE conversation_id=? AND status IN ('active','conflict')").all(c.id)) {
+        await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, row.root_directory || c.directory);
+        store.db.prepare("UPDATE worktrees SET status='discarded',updated=? WHERE id=?").run(Date.now(), row.id);
+      }
       store.removeConversation(c.id);
       return json(res, 200, { deleted: true });
     }
     if (method === 'PATCH') {
       const b = await body(req);
       if (b.model) validateModel(b.model, c.engine);
-      if ('projectId' in b) project(b.projectId);
+      if ('projectId' in b || 'workspace' in b || 'directory' in b) {
+        if (runs.has(c.id) || store.active(c.id) || store.db.prepare("SELECT 1 FROM commands WHERE conversation_id=? AND status='queued'").get(c.id)) throw fail('Finish or remove queued work before changing workspace.', 409);
+        if (b.revision !== undefined && b.revision !== c.revision) throw fail('Conversation changed; refresh before changing workspace.', 409);
+        const p = 'projectId' in b ? project(b.projectId) : (c.project_id ? project(c.project_id) : null);
+        const requested = b.workspace || b.directory;
+        if (requested) {
+          const directory = canonical(requested);
+          if (p && store.projectFor(directory)?.id !== p.id) throw fail('Choose a workspace belonging to this project.');
+          b.directory = directory;
+        } else {
+          b.directory = p ? canonical(p.directory) : GENERAL;
+        }
+        b.projectId = store.projectFor(b.directory)?.id || null;
+        /* Rebinding a conversation invalidates its isolated worktree(s). */
+        for (const row of store.db.prepare("SELECT * FROM worktrees WHERE conversation_id=? AND status IN ('active','conflict')").all(c.id)) {
+          await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, row.root_directory || c.directory);
+          store.db.prepare("UPDATE worktrees SET status='discarded',updated=? WHERE id=?").run(Date.now(), row.id);
+        }
+        store.db.prepare('UPDATE conversations SET native_id=NULL WHERE id=?').run(c.id);
+      }
       if ('title' in b) {
         if (typeof b.title !== 'string' || !b.title.trim()) throw fail('Title is required.');
         b.title = b.title.trim().slice(0, 120);
@@ -1451,6 +1378,7 @@ async function routes(req, res) {
     if (!command) throw fail('Command not found.', 404);
     if (!['failed', 'interrupted', 'interrupted_by_restart', 'cancelled'].includes(command.status)) throw fail('Only a finished command can be retried.', 409);
     const conversation = store.conversation(command.conversation_id);
+    if (conversation.paused) store.patchConversation(conversation.id, { paused: false });
     const input = decode(command.input, {});
     const newId = uid();
     const next = store.accept(conversation.id, input, command.model, command.reasoning, newId);
@@ -1492,13 +1420,19 @@ async function routes(req, res) {
   if (attachmentMatch && method === 'GET') {
     const attachment = store.db.prepare('SELECT * FROM attachments WHERE id=?').get(attachmentMatch[1]);
     if (!attachment) throw fail('Attachment not found.', 404);
+    const stream = createReadStream(path.join(BLOBS, attachment.filename));
+    stream.on('error', () => { if (!res.headersSent) json(res, 404, { error: 'Attachment not found.' }); else res.destroy(); });
     res.writeHead(200, { 'content-type': attachment.mime, 'content-length': attachment.bytes, 'cache-control': 'private, max-age=3600', 'x-content-type-options': 'nosniff' });
-    return createReadStream(path.join(BLOBS, attachment.filename)).pipe(res);
+    return stream.pipe(res);
   }
   const artifactMatch = /^\/artifacts\/([^/]+)$/.exec(route);
   if (artifactMatch && method === 'GET') {
     const artifact = store.db.prepare('SELECT * FROM artifacts WHERE id=?').get(artifactMatch[1]);
-    if (!artifact) throw fail('Artifact not found.', 404);
+    if (!artifact) {
+      const part = legacy && artifactMatch[1].startsWith('tool_') ? legacy.prepare('SELECT data FROM part WHERE id=?').get(artifactMatch[1].slice(5)) : null;
+      if (part) return json(res, 200, { artifact: decode(part.data, {}).state || {} });
+      throw fail('Artifact not found.', 404);
+    }
     return json(res, 200, { artifact: decode(artifact.data, { output: artifact.data }) });
   }
   const fileMatch = /^\/conversations\/([^/]+)\/files\/([^/]+)$/.exec(route);
@@ -1547,8 +1481,10 @@ async function routes(req, res) {
     if (!info.isFile() || info.size > 1024 * 1024) throw fail('Choose a file smaller than 1 MB.', 413);
     const extension = path.extname(target).toLowerCase();
     const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.md': 'text/markdown', '.json': 'application/json' }[extension] || 'text/plain';
+    const stream = createReadStream(target);
+    stream.on('error', () => { if (!res.headersSent) json(res, 404, { error: 'File not found.' }); else res.destroy(); });
     res.writeHead(200, { 'content-type': mime, 'content-length': info.size, 'cache-control': 'private, max-age=60', 'x-content-type-options': 'nosniff' });
-    return createReadStream(target).pipe(res);
+    return stream.pipe(res);
   }
 
   /* ---- Git worktrees (PLAN §12/§13) ---- */
@@ -1560,6 +1496,7 @@ async function routes(req, res) {
   const worktreeByRun = (runId) => store.db.prepare('SELECT * FROM worktrees WHERE run_id=? ORDER BY created DESC LIMIT 1').get(runId)
     || store.db.prepare('SELECT * FROM worktrees WHERE id=?').get(runId);
   const worktreeRootFor = (row) => {
+    if (row.root_directory) return canonical(row.root_directory);
     const p = store.projects().find((candidate) => candidate.id === row.project_id);
     if (!p) throw fail('Project not found.', 404);
     return canonical(p.directory);
@@ -1588,7 +1525,10 @@ async function routes(req, res) {
   if (runApplyMatch && method === 'POST') {
     const row = worktreeByRun(runApplyMatch[1]);
     if (!row) throw fail('No worktree is recorded for this run.', 404);
-    if (runs.has(row.conversation_id)) throw fail('Wait for the run to finish before applying its changes.', 409);
+    /* Guard on the durable command status, not the in-memory map: a run is
+       recorded terminal before its worker leaves `runs`, so the map would
+       reject a legitimate apply/discard in that window. */
+    if (conversationBusy(row.conversation_id)) throw fail('Wait for the run to finish before applying its changes.', 409);
     const result = await applyWorktree(worktreeRecord(row), worktreeRootFor(row));
     if (result.status === 'conflict') {
       store.db.prepare("UPDATE worktrees SET status='conflict',error=?,updated=? WHERE id=?").run(result.error || 'The changes no longer apply cleanly.', Date.now(), row.id);
@@ -1604,7 +1544,7 @@ async function routes(req, res) {
   if (runDiscardMatch && method === 'POST') {
     const row = worktreeByRun(runDiscardMatch[1]);
     if (!row) throw fail('No worktree is recorded for this run.', 404);
-    if (runs.has(row.conversation_id)) throw fail('Wait for the run to finish before discarding its changes.', 409);
+    if (conversationBusy(row.conversation_id)) throw fail('Wait for the run to finish before discarding its changes.', 409);
     await discardWorktree(worktreeRecord(row), worktreeRootFor(row));
     store.db.prepare("UPDATE worktrees SET status='discarded',error=NULL,updated=? WHERE id=?").run(Date.now(), row.id);
     emitTyped(row.conversation_id, row.run_id, 'git.diff.updated', { worktreeId: row.id, files: [] });
@@ -1632,11 +1572,14 @@ async function routes(req, res) {
       file = GLOBAL_AGENTS;
     } else {
       const p = project(b.projectId);
+      if (!p) throw fail('Project not found.', 404);
       const root = canonical(p.directory);
       const requested = String(b.path || AGENTS_FILENAME);
       file = path.resolve(root, requested);
-      if (file !== path.join(root, AGENTS_FILENAME) && !file.startsWith(`${root}${path.sep}`)) throw fail('That file is outside the project.', 400);
       if (path.basename(file) !== AGENTS_FILENAME) throw fail('Only AGENTS.md files can be edited.');
+      /* Lexical containment is not enough: a directory symlink inside the
+         project can point outside it. Resolve existing ancestors first. */
+      if (!insideDir(resolvedPath(root), resolvedPath(file))) throw fail('That file is outside the project.', 400);
     }
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const temp = `${file}.${uid()}.tmp`;
@@ -1743,12 +1686,12 @@ async function routes(req, res) {
 }
 
 importProjects();
-importLegacy();
-syncLegacySessions(true);
+maintenance('legacy_import', importLegacy);
+maintenance('legacy_sync', () => syncLegacySessions(true));
 store.recover();
 await seedCatalog();
 await importClips();
-reconcileRecordedRuns();
+maintenance('legacy_recovery', reconcileRecordedRuns);
 
 const server = createServer((req, res) => {
   routes(req, res).catch((error) => {
@@ -1773,16 +1716,43 @@ const heartbeat = setInterval(() => {
   }
 }, 10000);
 heartbeat.unref();
-const legacySync = setInterval(() => syncLegacySessions(true), 30_000);
+const legacySync = setInterval(() => maintenance('legacy_sync', () => syncLegacySessions(true)), 30_000);
 legacySync.unref();
 sampleSystem();
 const systemSampler = setInterval(sampleSystem, SYSTEM_SAMPLE_MS);
 systemSampler.unref();
-const prune = setInterval(() => {
-  store.db.prepare('DELETE FROM events WHERE created<? AND seq<(SELECT max(seq)-1000 FROM events)').run(Date.now() - 7 * 86400000);
+const prune = setInterval(() => maintenance('prune', () => {
+  store.pruneEvents();
   store.db.prepare('DELETE FROM artifacts WHERE length(data)<2 OR conversation_id NOT IN (SELECT id FROM conversations)').run();
-}, 3600000);
+  store.checkpoint();
+}), 60000);
 prune.unref();
+
+/* Worktree retention: applied/discarded worktrees are throwaway once the user
+   has decided; keep them briefly, then remove the directory and branch so disk
+   does not grow without bound. Active/conflict worktrees are never touched. */
+const WORKTREE_RETENTION_MS = Math.max(0, Number(process.env.WORKBENCH_WORKTREE_RETENTION_MS || 3 * 86400000));
+async function maintainWorktrees() {
+  let rows;
+  try {
+    rows = store.db.prepare("SELECT * FROM worktrees WHERE status IN ('applied','discarded') AND updated<?").all(Date.now() - WORKTREE_RETENTION_MS);
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'worktree_gc_failed', message: error.message }));
+    return;
+  }
+  let removed = 0;
+  for (const row of rows) {
+    try {
+      const root = row.root_directory || store.projects().find((p) => p.id === row.project_id)?.directory;
+      if (root && existsSync(root)) await discardWorktree({ id: row.id, path: row.path, branch: row.branch, baseCommit: row.base_commit }, canonical(root));
+      store.db.prepare('DELETE FROM worktrees WHERE id=?').run(row.id);
+      removed++;
+    } catch (error) { console.warn(JSON.stringify({ event: 'worktree_gc_failed', worktreeId: row.id, message: error.message })); }
+  }
+  if (removed) console.log(JSON.stringify({ event: 'worktree_gc', removed }));
+}
+const worktreeGc = setInterval(() => maintenance('worktree_gc', () => { maintainWorktrees().catch((error) => console.warn(JSON.stringify({ event: 'worktree_gc_failed', message: error.message }))); }), 3600_000);
+worktreeGc.unref();
 void refreshCatalog().catch((error) => console.warn(error.message));
 
 async function shutdown() {
@@ -1791,6 +1761,9 @@ async function shutdown() {
   clearInterval(scheduler);
   clearInterval(systemSampler);
   clearInterval(heartbeat);
+  clearInterval(legacySync);
+  clearInterval(prune);
+  clearInterval(worktreeGc);
   /* Graceful drain: give active workers a moment to finish instead of
      interrupting them the instant the process is asked to stop. Waiting runs
      (question/permission) cannot drain and are interrupted after the grace. */

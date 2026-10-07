@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import {
@@ -6,8 +6,6 @@ import {
   IconBinary,
   IconCopy,
   IconDownload,
-  IconFile,
-  IconFilePencil,
   IconFileText,
   IconLoader2,
   IconPhoto,
@@ -15,21 +13,10 @@ import {
 } from '@tabler/icons-react';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { STATUS_TONE, baseName, type FileRef } from '@/components/whirl/file-link';
 
-export type FileStatus = 'read' | 'changed' | 'created' | 'deleted';
-
-/** A reference to a file the viewer can open. `projectId` reads through the
- *  project file endpoint; `url`/`attachmentId` cover uploaded attachments. */
-export interface FileRef {
-  path: string;
-  status: FileStatus;
-  projectId?: string | null;
-  additions?: number;
-  deletions?: number;
-  attachmentId?: string;
-  url?: string;
-  name?: string;
-}
+export { FileLink } from '@/components/whirl/file-link';
+export type { FileRef, FileStatus } from '@/components/whirl/file-link';
 
 const MAX_LINES = 5000;
 
@@ -53,10 +40,6 @@ function languageFor(path: string) {
   return LANGUAGES[ext] || '';
 }
 
-function baseName(path: string) {
-  return path.split('/').filter(Boolean).pop() || path;
-}
-
 function mimeLooksText(mime: string) {
   if (!mime) return true;
   if (mime.startsWith('text/')) return true;
@@ -74,43 +57,6 @@ function looksBinary(bytes: Uint8Array, mime: string) {
     if (byte < 7 || (byte > 13 && byte < 32)) suspicious += 1;
   }
   return sample > 0 && suspicious / sample > 0.1;
-}
-
-function statusIcon(status: FileStatus): ReactNode {
-  if (status === 'changed') return <IconFilePencil size={13} />;
-  if (status === 'read') return <IconFileText size={13} />;
-  return <IconFile size={13} />;
-}
-
-const STATUS_TONE: Record<FileStatus, string> = {
-  read: 'text-muted-foreground',
-  changed: 'text-amber-600 dark:text-amber-400',
-  created: 'text-emerald-600 dark:text-emerald-400',
-  deleted: 'text-destructive',
-};
-
-/** Inline, clickable file reference used across the thread. */
-export function FileLink({ file, onOpen, className }: { file: FileRef; onOpen?: (file: FileRef) => void; className?: string }) {
-  const name = file.name || baseName(file.path);
-  const clickable = Boolean(onOpen);
-  return (
-    <button
-      type="button"
-      disabled={!clickable}
-      onClick={() => onOpen?.(file)}
-      title={file.path}
-      className={cn(
-        'inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 font-mono text-[12px] transition-colors duration-100',
-        clickable ? 'cursor-pointer hover:bg-accent' : 'cursor-default',
-        className,
-      )}
-    >
-      <span className={cn('shrink-0', STATUS_TONE[file.status])}>{statusIcon(file.status)}</span>
-      <span className="truncate text-foreground">{name}</span>
-      {(file.additions ?? 0) > 0 && <span className="shrink-0 tabular-nums text-emerald-600 dark:text-emerald-400">+{file.additions}</span>}
-      {(file.deletions ?? 0) > 0 && <span className="shrink-0 tabular-nums text-destructive">-{file.deletions}</span>}
-    </button>
-  );
 }
 
 function resolveUrl(file: FileRef): string | null {
@@ -239,7 +185,7 @@ export function FileViewer({ open, file, onOpenChange, onToast }: {
             </div>
           ) : loaded.kind === 'image' ? (
             <div className="wb-scroll grid h-full place-items-center overflow-auto p-4">
-              <img src={loaded.url} alt={downloadName} className="max-h-full max-w-full rounded-lg object-contain shadow-[inset_0_0_0_1px_var(--well-outline)]" />
+              <img src={loaded.url} alt={downloadName} className="max-h-full max-w-full rounded-xl object-contain shadow-[inset_0_0_0_1px_var(--well-outline)]" />
             </div>
           ) : loaded.kind === 'binary' ? (
             <div className="grid h-full place-items-center p-6 text-center">
@@ -270,6 +216,17 @@ export function FileViewer({ open, file, onOpenChange, onToast }: {
  *  shared `.hljs-*` classes; unknown languages stay plain. */
 function HighlightedCode({ text, language }: { text: string; language: string }) {
   const lines = useMemo(() => text.split('\n'), [text]);
+  /* Pick a fence longer than any backtick run in the file so embedded ``` does
+     not prematurely close the Markdown code block. */
+  const fence = useMemo(() => {
+    let longest = 0;
+    let current = 0;
+    for (const char of text) {
+      if (char === '`') { current += 1; longest = Math.max(longest, current); }
+      else current = 0;
+    }
+    return '`'.repeat(Math.max(3, longest + 1));
+  }, [text]);
   return (
     <div className="wb-scroll h-full overflow-auto">
       <ReactMarkdown
@@ -284,7 +241,7 @@ function HighlightedCode({ text, language }: { text: string; language: string })
             </div>
           ),
         }}
-      >{`\`\`\`${language}\n${text}\n\`\`\``}</ReactMarkdown>
+      >{`${fence}${language}\n${text}\n${fence}`}</ReactMarkdown>
     </div>
   );
 }

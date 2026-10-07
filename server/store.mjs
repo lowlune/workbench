@@ -10,8 +10,8 @@ export const fail = (message, status = 400) => Object.assign(new Error(message),
 export const canonical = (value) => { const result = realpathSync(value); if (!statSync(result).isDirectory()) throw fail('Folder is not a directory.'); return result; };
 
 /* Run lifecycle (PLAN §9). `queued` waits in the scheduler; capacity statuses
-   occupy a worker slot; `waiting_for_*` are blocked on the user (they release
-   capacity but keep their workspace lease). Legacy names are still accepted on
+   occupy a worker slot; `waiting_for_*` are blocked on the user and retain
+   their resident worker slot. Legacy names are still accepted on
    write and normalized to the new vocabulary. */
 export const RUN_CAPACITY = ['starting', 'running', 'interrupting'];
 export const RUN_WAITING = ['waiting_for_user', 'waiting_for_permission'];
@@ -25,7 +25,7 @@ export class Store {
   constructor(directory) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path.join(directory, 'workbench.sqlite'));
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, directory TEXT UNIQUE NOT NULL, model TEXT, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS workspaces(directory TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),git_common TEXT);
@@ -59,6 +59,8 @@ export class Store {
        many times per second and search only needs the settled text. */
     this.pendingSearch = new Map();
     this.searchTimers = new Map();
+    this.metrics = { transientEvents: 0, durableEvents: 0, prunedEvents: 0 };
+    this.pruneEvents();
   }
 
   addColumn(table, column, definition) {
@@ -78,6 +80,8 @@ export class Store {
       ['commands', 'todos', 'TEXT'],
       ['commands', 'summary', 'TEXT'],
       ['commands', 'failure_code', 'TEXT'],
+      ['commands', 'attempts', 'INTEGER NOT NULL DEFAULT 0'],
+      ['commands', 'retry_at', 'INTEGER'],
       ['events', 'kind', 'TEXT'],
       ['events', 'run_id', 'TEXT'],
       ['interactions', 'run_id', 'TEXT'],
@@ -106,6 +110,8 @@ export class Store {
         WHERE status IN ('starting','running','waiting_for_user','waiting_for_permission','interrupting');
       PRAGMA user_version=2;`);
     this.addColumn('notifications', 'delivery', 'TEXT');
+    this.addColumn('worktrees', 'root_directory', 'TEXT');
+    this.db.exec(`UPDATE worktrees SET root_directory=(SELECT directory FROM conversations WHERE id=worktrees.conversation_id) WHERE root_directory IS NULL;`);
   }
 
   queueSearch(id, conversationId, text) {
@@ -133,19 +139,35 @@ export class Store {
     try { const result=fn();this.db.exec('COMMIT');const events=this.pendingEvents;this.pendingEvents=null;for(const event of events)this.publish(event);return result; }
     catch(e){this.db.exec('ROLLBACK');this.pendingEvents=null;throw e;}
   }
-  publish(event){queueMicrotask(()=>{for(const listener of this.listeners)listener(event);});}
+  publish(event){queueMicrotask(()=>{for(const listener of this.listeners){try{listener(event);}catch(error){console.warn(JSON.stringify({event:'event_listener_error',message:error.message}));}}});}
   getSetting(key, fallback = null) { return decode(this.db.prepare('SELECT value FROM settings WHERE key=?').get(key)?.value, fallback); }
   setSetting(key, value) { this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run(key, JSON.stringify(value)); }
   event(type, conversationId, data = {}, meta = {}) {
     const kind = meta.kind || type;
     const runId = meta.runId || data.runId || null;
-    const result = this.db.prepare('INSERT INTO events(type,conversation_id,data,created,kind,run_id) VALUES (?,?,?,?,?,?)').run(type, conversationId || null, JSON.stringify(data), Date.now(), kind, runId);
+    if (type === 'text.delta' || meta.transient) {
+      this.metrics.transientEvents++;
+      const event = { ...data, type, kind, conversationId, runId };
+      if(this.pendingEvents)this.pendingEvents.push(event);else this.publish(event);
+      return event;
+    }
+    // Live clients receive the snapshot; replay clients fetch the canonical row.
+    const durable = type === 'message.updated' ? { messageId: data.message?.id } : data;
+    const result = this.db.prepare('INSERT INTO events(type,conversation_id,data,created,kind,run_id) VALUES (?,?,?,?,?,?)').run(type, conversationId || null, JSON.stringify(durable), Date.now(), kind, runId);
+    this.metrics.durableEvents++;
+    if (this.metrics.durableEvents % 128 === 0) this.pruneEvents();
     const event = { seq: Number(result.lastInsertRowid), type, kind, conversationId, runId, ...data };
     // Notifications are deferred until after the surrounding synchronous transaction commits.
     if(this.pendingEvents)this.pendingEvents.push(event);else this.publish(event);
     return event;
   }
-  sequence() { return Number(this.db.prepare('SELECT coalesce(max(seq),0) AS seq FROM events').get().seq); }
+  sequence() { return Number(this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='events'").get()?.seq || 0); }
+  pruneEvents({ maxCount = 5000, maxAgeMs = 86400000, now = Date.now() } = {}) {
+    const cutoff = this.db.prepare('SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?').get(Math.max(0, maxCount - 1))?.seq || 0;
+    const result = this.db.prepare("DELETE FROM events WHERE type='text.delta' OR created<? OR seq<?").run(now - maxAgeMs, cutoff);
+    this.metrics.prunedEvents += Number(result.changes);
+    return Number(result.changes);
+  }
   projectFor(directory) {
     let real=directory;try{real=canonical(directory);}catch{}
     const roots=[...this.projects(),...this.db.prepare('SELECT p.id,p.name,w.directory FROM workspaces w JOIN projects p ON p.id=w.project_id').all()];
@@ -185,7 +207,7 @@ export class Store {
       reasoning:row.reasoning,mode:row.mode,pinned:!!row.pinned,hidden:!!row.hidden,paused:!!row.paused,revision:row.revision,
       created:row.created,updated:row.updated,canResume:true,legacy:!!row.legacy_id,attention,
       status:busy ? 'working' : active?.status || 'idle',runStatus: active?.status || 'idle',resumeStatus:busy ? 'working':'idle',
-      activeRun: active ? {id:active.id,status:active.status,error:active.error,failureCode:active.failure_code||null,model:active.model,provider:active.provider,engine:active.engine,worktreeId:active.worktree_id,heartbeat:active.heartbeat,todos:decode(active.todos,[])||[],started:active.started,ended:active.ended} : null,
+      activeRun: active ? {id:active.id,status:active.status,error:active.error,failureCode:active.failure_code||null,model:active.model,provider:active.provider,engine:active.engine,worktreeId:active.worktree_id,heartbeat:active.heartbeat,todos:decode(active.todos,[])||[],attempts:active.attempts||0,retryAt:active.retry_at||null,started:active.started,ended:active.ended} : null,
       queued:queued.map((x,index)=>({id:x.id,...decode(x.input,{}),model:x.model,position:index,created:x.created})),
       interactions,...extra };
   }
@@ -206,7 +228,7 @@ export class Store {
     return this.transaction(()=>{
       const row=this.conversation(id);
       if(revision!==undefined && revision!==row.revision)throw fail('Conversation changed on another device. Refresh and try again.',409);
-      const allowed={title:'title',model:'model',reasoning:'reasoning',pinned:'pinned',hidden:'hidden',projectId:'project_id',paused:'paused'};
+      const allowed={title:'title',model:'model',reasoning:'reasoning',pinned:'pinned',hidden:'hidden',projectId:'project_id',directory:'directory',paused:'paused'};
       for(const [key,column] of Object.entries(allowed))if(Object.hasOwn(patch,key)){
         const value=['pinned','hidden','paused'].includes(key)?Number(Boolean(patch[key])):patch[key];
         this.db.prepare(`UPDATE conversations SET ${column}=? WHERE id=?`).run(value,id);
@@ -256,12 +278,23 @@ export class Store {
     status=normalizeStatus(status);
     const terminal=RUN_TERMINAL.includes(status);
     this.transaction(()=>{
-      this.db.prepare('UPDATE commands SET status=?,error=?,failure_code=?,started=coalesce(started,?),ended=?,heartbeat=? WHERE id=?').run(status,error,failureCode,Date.now(),terminal?Date.now():null,Date.now(),commandId);
+      this.db.prepare('UPDATE commands SET status=?,error=?,failure_code=?,started=coalesce(started,?),ended=?,heartbeat=?,retry_at=NULL WHERE id=?').run(status,error,failureCode,Date.now(),terminal?Date.now():null,Date.now(),commandId);
       this.db.prepare('UPDATE conversations SET updated=?,revision=revision+1 WHERE id=?').run(Date.now(),row.conversation_id);
       if(terminal && status!=='completed')this.db.prepare('UPDATE conversations SET paused=1 WHERE id=?').run(row.conversation_id);
-      if(terminal)this.db.prepare("UPDATE interactions SET status='closed' WHERE conversation_id=? AND status='pending'").run(row.conversation_id);
+      if(terminal)this.db.prepare("UPDATE interactions SET status='closed' WHERE conversation_id=? AND status IN ('pending','responding')").run(row.conversation_id);
       if(terminal)this.flushSearchAll();
       this.event('run.updated',row.conversation_id,{commandId,status,error,failureCode},{kind:'run.updated',runId:commandId});
+    });
+  }
+  /* Automatic retry of a transient failure: return the same command to the queue
+     with a not-before timestamp and an incremented attempt counter. Unlike a
+     terminal failure this never pauses the conversation. */
+  retry(commandId, attempt, retryAt) {
+    const row=this.db.prepare('SELECT * FROM commands WHERE id=?').get(commandId);if(!row)return;
+    this.transaction(()=>{
+      this.db.prepare("UPDATE commands SET status='queued',attempts=?,retry_at=?,error=NULL,failure_code=NULL,started=NULL,ended=NULL,native_message=NULL WHERE id=?").run(attempt,retryAt,commandId);
+      this.db.prepare('UPDATE conversations SET paused=0,updated=?,revision=revision+1 WHERE id=?').run(Date.now(),row.conversation_id);
+      this.event('run.updated',row.conversation_id,{commandId,status:'queued',attempt},{kind:'run.updated',runId:commandId});
     });
   }
   heartbeat(commandId) {
@@ -300,5 +333,9 @@ export class Store {
       return row;
     });
   }
+  /* Keep the WAL bounded without blocking writers. PASSIVE never waits for
+     readers; the periodic maintenance tick calls this so the -wal file cannot
+     grow without limit under a long-lived control plane. */
+  checkpoint(mode='PASSIVE'){try{this.db.exec(`PRAGMA wal_checkpoint(${mode})`);}catch(error){console.warn(JSON.stringify({event:'wal_checkpoint_failed',message:error.message}));}}
   close(){this.flushSearchAll();this.db.close();}
 }

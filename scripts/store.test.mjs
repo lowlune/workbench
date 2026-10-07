@@ -43,3 +43,20 @@ test('project resolution uses the longest path-segment ancestor',t=>{
   const {store}=fixture(t);store.db.prepare('INSERT INTO projects VALUES (?,?,?,?,?)').run('parent','Parent','/projects/app',null,0);store.db.prepare('INSERT INTO projects VALUES (?,?,?,?,?)').run('child','Child','/projects/app/packages/site',null,0);
   assert.equal(store.projectFor('/projects/app-old'),null);assert.equal(store.projectFor('/projects/app/packages/site/src').id,'child');
 });
+test('a transient retry requeues without pausing; a status change clears the retry timestamp',t=>{
+  const {store}=fixture(t);const c=store.createConversation({directory:'/tmp'});const id=uid();
+  store.accept(c.id,{text:'one'},'p/m',null,id);store.status(id,'running');
+  const at=Date.now()+30000;store.retry(id,1,at);
+  const row=store.db.prepare('SELECT status,attempts,retry_at FROM commands WHERE id=?').get(id);
+  assert.equal(row.status,'queued');assert.equal(row.attempts,1);assert.equal(row.retry_at,at);
+  assert.equal(store.view(store.conversation(c.id)).paused,false);
+  store.status(id,'running');
+  assert.equal(store.db.prepare('SELECT retry_at FROM commands WHERE id=?').get(id).retry_at,null);
+});
+test('a transient retry clears native_message so the user turn is not resubmitted',t=>{
+  const {store}=fixture(t);const c=store.createConversation({directory:'/tmp'});const id=uid();
+  store.accept(c.id,{text:'one'},'p/m',null,id);store.status(id,'running');
+  store.db.prepare('UPDATE commands SET native_message=? WHERE id=?').run('msg_native',id);
+  store.retry(id,1,Date.now()+1000);
+  assert.equal(store.db.prepare('SELECT native_message FROM commands WHERE id=?').get(id).native_message,null);
+});

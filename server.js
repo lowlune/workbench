@@ -1,10 +1,11 @@
 import { createServer, request as httpRequest } from 'node:http';
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, readFileSync } from 'node:fs';
 import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readCookie, hasSession, newSession, matchesPassword, matchesSecret, sessionCookie as workbenchSessionCookie } from './shared/auth.mjs';
 
 /* Workbench gateway: authentication, login rate limiting, the public
    health endpoint and the streaming proxy to the control plane. Agent
@@ -17,7 +18,6 @@ const LOGIN_FAILURES_FILE = path.join(DATA, 'login-failures.json');
 const PORT = Number(process.env.PORT || 8787);
 const CONTROL_PORT = Number(process.env.WORKBENCH_CONTROL_PORT || 8788);
 const SECRET_FILE = path.join(HOME, '.config/secrets/workbench-cloudflare-secrets.json');
-const SESSION_TTL = 14 * 24 * 60 * 60;
 const PUBLIC_LOGIN_PATHS = new Set([
   '/login',
   '/login.html',
@@ -120,58 +120,6 @@ function sameOrigin(req) {
   }
 }
 
-function proxyKeyMatches(value) {
-  if (!INTERNAL_PROXY_KEY || typeof value !== 'string') return false;
-  const received = Buffer.from(value);
-  const expected = Buffer.from(INTERNAL_PROXY_KEY);
-  return received.length === expected.length && timingSafeEqual(received, expected);
-}
-
-function matchesWorkbenchKey(candidate) {
-  if (!WORKBENCH_LOGIN_KEY || typeof candidate !== 'string' || candidate.length > 256) return false;
-  const normalizedCandidate = candidate.replace(/[\s-]/g, '').toLowerCase();
-  const normalizedExpected = String(WORKBENCH_LOGIN_KEY).replace(/[\s-]/g, '').toLowerCase();
-  const candidateHash = createHash('sha256').update(normalizedCandidate).digest();
-  const expectedHash = createHash('sha256').update(normalizedExpected).digest();
-  const sameHash = timingSafeEqual(candidateHash, expectedHash);
-  return sameHash && normalizedCandidate.length === normalizedExpected.length;
-}
-
-function requestCookie(req, name) {
-  for (const part of String(req.headers.cookie || '').split(';')) {
-    const equals = part.indexOf('=');
-    if (equals >= 0 && part.slice(0, equals).trim() === name) return part.slice(equals + 1).trim();
-  }
-  return '';
-}
-
-function hasWorkbenchSession(req) {
-  if (!WORKBENCH_SESSION_SECRET) return false;
-  const token = requestCookie(req, 'workbench_session');
-  if (!token || token.length > 512) return false;
-  const [expires, nonce, signature, extra] = token.split('.');
-  if (!expires || !/^\d+$/.test(expires) || !nonce || !signature || extra !== undefined) return false;
-  if (!/^[A-Za-z0-9_-]+$/.test(nonce) || !/^[A-Za-z0-9_-]+$/.test(signature)) return false;
-  const expiry = Number(expires);
-  if (!Number.isSafeInteger(expiry) || expiry <= Math.floor(Date.now() / 1000)) return false;
-  const expected = createHmac('sha256', WORKBENCH_SESSION_SECRET).update(`${expires}.${nonce}`).digest();
-  const actual = Buffer.from(signature, 'base64url');
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
-
-function newWorkbenchSession() {
-  if (!WORKBENCH_SESSION_SECRET) throw new Error('Login protection is not configured.');
-  const expires = Math.floor(Date.now() / 1000) + SESSION_TTL;
-  const nonce = randomBytes(18).toString('base64url');
-  const payload = `${expires}.${nonce}`;
-  const signature = createHmac('sha256', WORKBENCH_SESSION_SECRET).update(payload).digest('base64url');
-  return `${payload}.${signature}`;
-}
-
-function workbenchSessionCookie(value, maxAge = SESSION_TTL) {
-  return `workbench_session=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
-}
-
 async function loadLoginFailures() {
   try {
     const saved = JSON.parse(await readFile(LOGIN_FAILURES_FILE, 'utf8'));
@@ -265,7 +213,7 @@ async function directLogin(req, res) {
   } catch (error) {
     return json(res, error.status || 400, { error: error.message || 'Invalid login form.' });
   }
-  const validPassword = matchesWorkbenchKey(password);
+  const validPassword = await matchesPassword(password, WORKBENCH_LOGIN_KEY);
   const attempt = await recordLoginAttempt(req.socket.remoteAddress || 'tailnet', validPassword);
   if (!attempt.allowed) {
     if (await serveStatic(req, res, '/login.html', 429, {
@@ -280,7 +228,7 @@ async function directLogin(req, res) {
   }
   res.writeHead(303, {
     Location: '/',
-    'Set-Cookie': workbenchSessionCookie(newWorkbenchSession()),
+    'Set-Cookie': workbenchSessionCookie(await newSession(WORKBENCH_SESSION_SECRET)),
     'Cache-Control': 'no-store',
     'Referrer-Policy': 'no-referrer',
   });
@@ -381,7 +329,7 @@ async function route(req, res) {
     return json(res, 403, { error: 'Cross-origin request blocked.' });
   }
 
-  const trustedProxy = proxyKeyMatches(req.headers['x-workbench-internal-key']);
+  const trustedProxy = await matchesSecret(req.headers['x-workbench-internal-key'], INTERNAL_PROXY_KEY);
   if (pathname === '/api/internal/login-attempt' && req.method === 'POST') {
     if (!INTERNAL_PROXY_KEY) return json(res, 503, { error: 'Login protection is not configured.' });
     if (!trustedProxy) return json(res, 403, { error: 'Forbidden.' });
@@ -405,7 +353,7 @@ async function route(req, res) {
   }
 
   const publicLoginAsset = ['GET', 'HEAD'].includes(req.method) && PUBLIC_LOGIN_PATHS.has(pathname);
-  if (!trustedProxy && !publicLoginAsset && !hasWorkbenchSession(req)) {
+  if (!trustedProxy && !publicLoginAsset && !(await hasSession(readCookie(req.headers.cookie), WORKBENCH_SESSION_SECRET))) {
     if (pathname.startsWith('/api/')) return json(res, 401, { error: 'Sign in to Workbench.' });
     res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' });
     return res.end();
@@ -440,5 +388,17 @@ server.listen(PORT, '127.0.0.1', () => {
 });
 
 process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
+  /* Long-lived SSE and proxy connections can keep server.close() pending
+     forever. Drop idle sockets immediately and force-close the rest after a
+     short deadline so shutdown always completes. */
+  const deadline = setTimeout(() => {
+    server.closeAllConnections();
+    process.exit(0);
+  }, 5000);
+  deadline.unref();
+  server.close(() => {
+    clearTimeout(deadline);
+    process.exit(0);
+  });
+  server.closeIdleConnections();
 });

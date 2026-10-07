@@ -69,7 +69,7 @@ export function HistoryView({
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search conversations…"
             aria-label="Search conversations"
-            className="h-10 w-full rounded-2xl bg-well pr-4 pl-9 text-[13px] ring-1 ring-[var(--well-outline)] transition-shadow outline-none placeholder:text-muted-foreground focus-visible:shadow-[0_0_0_3px_color-mix(in_oklab,var(--foreground)_6%,transparent)]"
+            className="h-10 w-full rounded-xl bg-well pr-4 pl-9 text-[13px] ring-1 ring-[var(--well-outline)] transition-shadow outline-none placeholder:text-muted-foreground focus-visible:shadow-[0_0_0_3px_color-mix(in_oklab,var(--foreground)_6%,transparent)]"
           />
         </div>
 

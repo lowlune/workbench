@@ -1,20 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconAlertTriangleFilled, IconArrowLeft, IconBook, IconX } from '@tabler/icons-react';
+import { IconAlertTriangleFilled, IconArrowLeft, IconArrowUpRight, IconBook, IconLoader2, IconX } from '@tabler/icons-react';
 import { Composer } from '@/components/whirl/composer';
 import { ConversationNav } from '@/components/whirl/conversation-nav';
-import { FileViewer, type FileRef } from '@/components/whirl/file-viewer';
+import type { FileRef } from '@/components/whirl/file-viewer';
 import { InteractionCard } from '@/components/whirl/interaction-card';
 import { ModelMenu } from '@/components/whirl/model-menu';
+import { WorkspaceMenu } from '@/components/whirl/workspace-menu';
 import { RunSummary } from '@/components/whirl/run-summary';
-import { ConveyorLoop } from '@/components/loading-ui/conveyor-loop';
+import { TaskListPanel } from '@/components/whirl/task-list-panel';
 import { ThreadView } from '@/components/whirl/thread/thread-view';
 import { getOlderMessages } from '@/lib/api';
+import { readTabScroll, writeTabScroll } from '@/lib/tabs';
 import type { Attachment } from '@/lib/attachments';
-import { formatTokens, messageContext } from '@/lib/format';
-import type { Agent, QueuedMessage, Session } from '@/lib/types';
+import { messageContext } from '@/lib/format';
+import type { Agent, Project, QueuedMessage, Session } from '@/lib/types';
 import { cn, humanBytes } from '@/lib/utils';
 import { conversationPrompts, steerConversation, ACTIVE_RUN_STATES, mutate } from '@/lib/workbench';
+
+const FileViewer = lazy(() => import('@/components/whirl/file-viewer').then(module => ({ default: module.FileViewer })));
 
 interface ChatViewProps {
   session?: Session;
@@ -45,6 +49,8 @@ interface ChatViewProps {
   onViewChanges?: (runId: string, active: boolean) => void;
   onOpenAgentsMd?: () => void;
   agentsMdActive?: boolean;
+  projects?: Project[];
+  onSelectWorkspace?: (projectId: string | null) => void;
 }
 
 /* True while any dialog, dropdown, listbox or popover is on screen, so ESC
@@ -90,6 +96,8 @@ export function ChatView({
   onViewChanges,
   onOpenAgentsMd,
   agentsMdActive,
+  projects,
+  onSelectWorkspace,
 }: ChatViewProps) {
   const queryClient = useQueryClient();
   const sectionRef = useRef<HTMLElement>(null);
@@ -169,6 +177,7 @@ export function ChatView({
   const isWorking = hasLivePane ? agent?.status === 'working' : resumeRunning;
   const messages = session?.messages;
   const interactions = session?.interactions || [];
+  const todos = session?.activeRun?.todos?.length ? session.activeRun.todos : session?.todos;
   const promptsQuery = useQuery({
     queryKey: ['prompts', sessionId],
     queryFn: () => conversationPrompts(sessionId!),
@@ -256,6 +265,32 @@ export function ChatView({
     }
   }
 
+  /* Per-tab scroll restore: the transcript
+     scroller is reused across tab switches, so remember where each chat was
+     and put it back the first time its messages render. */
+  const restoredForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!sessionId || !messages) return;
+    if (restoredForRef.current === sessionId) return;
+    restoredForRef.current = sessionId;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const saved = readTabScroll(sessionId);
+    viewport.scrollTop = saved == null ? viewport.scrollHeight : saved;
+  }, [sessionId, messages]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !sessionId) return;
+    let frame = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => writeTabScroll(sessionId, viewport.scrollTop));
+    };
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    return () => { viewport.removeEventListener('scroll', onScroll); cancelAnimationFrame(frame); };
+  }, [sessionId]);
+
   const queuedIds = useMemo(() => new Set(queued.map((item) => item.id)), [queued]);
 
   const context = useMemo(() => {
@@ -282,6 +317,7 @@ export function ChatView({
           <IconArrowLeft size={16} />
         </button>
         <div className="pointer-events-auto ml-auto flex min-w-0 items-center gap-1.5">
+          <TaskListPanel todos={todos} />
           {onOpenAgentsMd && agentsMdActive && (
             <button
               type="button"
@@ -326,7 +362,7 @@ export function ChatView({
         <ConversationNav messages={messages} prompts={promptsQuery.data?.prompts} viewportRef={viewportRef} onJump={jumpToMessage} />
         {loadingOlder && (
           <span role="status" className="absolute top-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-(--popover-translucent) px-3 py-1 text-[11px] text-muted-foreground ring-1 ring-border backdrop-blur-sm">
-            <ConveyorLoop className="text-[9px] text-muted-foreground/70" trackLength={8} />
+            <IconLoader2 size={12} className="animate-spin text-muted-foreground/70" />
             Loading earlier messages…
           </span>
         )}
@@ -357,7 +393,7 @@ export function ChatView({
                 {paused && (
                   <div
                     role="status"
-                    className="mb-2 flex items-center gap-2 rounded-[22px] border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
+                    className="mb-2 flex items-center gap-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
                   >
                     <span className="min-w-0 flex-1 text-muted-foreground">Queue paused — the agent is not processing messages.</span>
                     <button
@@ -372,16 +408,27 @@ export function ChatView({
                 {queued.length > 0 && (
                   <div
                     role="status"
-                    className="mb-2 rounded-[22px] border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
+                    className="mb-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
                   >
-                    <div className="flex items-baseline gap-1.5 px-1 text-[11px] text-muted-foreground">
+                    <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
                       <span className="font-medium text-foreground/80">Queued</span>
                       <span className="tabular-nums">{queued.length}</span>
                       <span className="ml-auto">sends after this reply</span>
+                      {runActive && (
+                        <button
+                          type="button"
+                          onClick={() => void steer()}
+                          title="Send into the running agent now — it adapts at its next step"
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-well px-2 py-0.5 font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-colors duration-150 hover:bg-accent"
+                        >
+                          <IconArrowUpRight size={11} stroke={2.2} />
+                          Steer
+                        </button>
+                      )}
                     </div>
                     <ul className="mt-1 flex flex-col">
                       {queued.map((item) => (
-                        <li key={item.id} className="group/q flex items-center gap-2 rounded-lg px-1 py-1 transition-colors duration-100 hover:bg-accent">
+                        <li key={item.id} className="group/q flex items-center gap-2 rounded-md px-1 py-1 transition-colors duration-100 hover:bg-accent">
                           <span aria-hidden="true" className="size-1 shrink-0 rounded-full bg-muted-foreground/50" />
                           <span className="min-w-0 flex-1 truncate text-foreground/90">
                             {item.text || `${item.attachments.length} attachment${item.attachments.length === 1 ? '' : 's'}`}
@@ -406,7 +453,6 @@ export function ChatView({
                   onAttachmentsChange={onAttachmentsChange}
                   onSend={onSend}
                   onStop={runActive || resumeRunning || hasLivePane ? stopRun : undefined}
-                  onSteer={runActive ? steer : undefined}
                   isGenerating={Boolean(isWorking || runActive)}
                   sending={sending}
                   sendBlocked={needsAttention}
@@ -421,6 +467,14 @@ export function ChatView({
                   onToast={onToast}
                   meta={(
                     <>
+                      {onSelectWorkspace && projects && (
+                        <WorkspaceMenu
+                          projectId={session?.projectId}
+                          directory={session?.directory}
+                          projects={projects}
+                          onSelect={onSelectWorkspace}
+                        />
+                      )}
                       <ModelMenu
                         model={selectedModel || session?.modelPref || context.model}
                         context={context}
@@ -435,7 +489,7 @@ export function ChatView({
                           title={`${context.percent}% of the context window used`}
                           className="shrink-0 tabular-nums text-[11px] text-muted-foreground"
                         >
-                          {formatTokens(context.used)}/{formatTokens(context.limit)}
+                          {context.percent}%
                         </span>
                       )}
                     </>
@@ -443,7 +497,7 @@ export function ChatView({
                 />
               </>
             ) : (
-              <div className="flex items-center justify-between gap-3 rounded-[26px] bg-well px-4 py-3 shadow-[inset_0_0_0_1px_var(--well-outline)]">
+              <div className="flex items-center justify-between gap-3 rounded-3xl bg-well px-4 py-3 shadow-[inset_0_0_0_1px_var(--well-outline)]">
                 <p className="text-[13px]/5 text-muted-foreground">This saved conversation is read-only — its project folder is unavailable.</p>
                 <button type="button" onClick={onNewTask} className="shrink-0 cursor-pointer rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96]">
                   Start a task
@@ -453,7 +507,7 @@ export function ChatView({
           </div>
         </div>
       </div>
-      <FileViewer open={viewerOpen} file={viewerFile} onOpenChange={setViewerOpen} onToast={onToast} />
+      {viewerOpen && <Suspense fallback={null}><FileViewer open={viewerOpen} file={viewerFile} onOpenChange={setViewerOpen} onToast={onToast} /></Suspense>}
     </section>
   );
 }

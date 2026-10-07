@@ -78,7 +78,7 @@ export function NotificationsCenter({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[8vh] flex max-h-[80vh] w-[calc(100vw-2rem)] max-w-md flex-col gap-0 rounded-2xl p-0">
+      <DialogContent className="top-[8vh] flex max-h-[80vh] w-[calc(100vw-2rem)] max-w-md flex-col gap-0 rounded-xl p-0">
         <DialogTitle className="sr-only">Notifications</DialogTitle>
         <DialogDescription className="sr-only">Recent attention events and notification preferences.</DialogDescription>
 
@@ -111,7 +111,7 @@ export function NotificationsCenter({
               type="button"
               onClick={() => openItem(item)}
               className={cn(
-                'flex w-full min-w-0 cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors duration-75 hover:bg-accent',
+                'flex w-full min-w-0 cursor-pointer items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors duration-75 hover:bg-accent',
                 item.conversationId ? '' : 'cursor-default',
               )}
             >
@@ -185,7 +185,7 @@ function Toggle({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        'mt-1 flex w-full cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50',
+        'mt-1 flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50',
       )}
     >
       <span className="min-w-0 flex-1">

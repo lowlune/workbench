@@ -64,7 +64,7 @@ export function SearchPalette({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[12vh] max-w-lg gap-0 rounded-2xl p-0" backdropClassName="backdrop-blur-xs">
+      <DialogContent className="top-[12vh] max-w-lg gap-0 rounded-xl p-0" backdropClassName="backdrop-blur-xs">
         <DialogTitle className="sr-only">Search</DialogTitle>
         <DialogDescription className="sr-only">Search conversations and jump between views.</DialogDescription>
         <div className="flex items-center gap-2.5 border-b border-border px-4">
@@ -102,7 +102,7 @@ export function SearchPalette({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => choose(item)}
                 className={cn(
-                  'flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors duration-75',
+                  'flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors duration-75',
                   isActive ? 'bg-accent' : 'hover:bg-accent',
                 )}
               >

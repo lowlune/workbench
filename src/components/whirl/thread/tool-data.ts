@@ -85,6 +85,20 @@ export function isToolPart(part: MessagePart) {
   return TOOL_TYPES.has(String(part.type || '').toLowerCase());
 }
 
+/** Tool parts, deduped by call id — a streamed/patched call must appear once. */
+export function uniqueToolParts(parts: MessagePart[]): MessagePart[] {
+  const seen = new Set<string>();
+  const output: MessagePart[] = [];
+  for (const part of parts) {
+    if (!isToolPart(part)) continue;
+    const key = String(part.callID || part.id || '');
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    output.push(part);
+  }
+  return output;
+}
+
 type RawPart = MessagePart & Record<string, unknown>;
 
 function str(value: unknown): string {

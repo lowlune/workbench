@@ -25,13 +25,13 @@ export function SystemPanel({
   onToast: (message: string, isError?: boolean) => void;
 }) {
   const historyQuery = useQuery({ queryKey: ['system-history'], queryFn: getSystemHistory, refetchInterval: 60_000, enabled: open });
-  const processesQuery = useQuery({ queryKey: ['processes'], queryFn: getProcesses, refetchInterval: 5_000, enabled: open });
+  const processesQuery = useQuery({ queryKey: ['processes'], queryFn: getProcesses, refetchInterval: 15_000, refetchIntervalInBackground: false, enabled: open });
   const samples = historyQuery.data?.samples || [];
   const working = agents.filter((agent) => agent.status === 'working' || agent.status === 'blocked');
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="top-[6vh] flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl flex-col rounded-2xl">
+      <DialogContent className="top-[6vh] flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl flex-col rounded-xl">
         <DialogTitle>System</DialogTitle>
         <DialogDescription className="sr-only">CPU, memory, disk, tasks and running processes.</DialogDescription>
         <button
@@ -108,7 +108,7 @@ export function SystemPanel({
 
 function Gauge({ label, percent, detail }: { label: string; percent: number; detail?: string }) {
   return (
-    <div className="rounded-2xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
+    <div className="rounded-xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">{label}</span>
         <span className="text-[15px] font-semibold tabular-nums">{percent}%</span>
@@ -129,7 +129,7 @@ function HistoryChart({ samples }: { samples: SystemSample[] }) {
   const height = 140;
   if (samples.length < 2) {
     return (
-      <div className="mt-3 grid h-36 place-items-center rounded-2xl bg-well text-[12px] text-muted-foreground shadow-[inset_0_0_0_1px_var(--well-outline)]">
+      <div className="mt-3 grid h-36 place-items-center rounded-xl bg-well text-[12px] text-muted-foreground shadow-[inset_0_0_0_1px_var(--well-outline)]">
         Collecting the first samples…
       </div>
     );
@@ -142,7 +142,7 @@ function HistoryChart({ samples }: { samples: SystemSample[] }) {
   const spanMinutes = Math.round((last.t - samples[0].t) / 60_000);
 
   return (
-    <div className="mt-3 rounded-2xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
+    <div className="mt-3 rounded-xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
       <div className="flex items-center justify-between gap-2 text-[11px]">
         <span className="text-muted-foreground">Last {Math.max(1, spanMinutes)} min</span>
         <span className="flex items-center gap-3 tabular-nums">
@@ -174,7 +174,7 @@ function ProcessRow({ process, onToast }: { process: ProcessInfo; onToast: (mess
     onError: (error: Error) => onToast(error.message, true),
   });
   return (
-    <div className="flex min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 transition-colors hover:bg-accent">
+    <div className="flex min-w-0 items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-accent">
       <span className="w-14 shrink-0 text-[11px] tabular-nums text-muted-foreground">{process.pid}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[12px]">{process.name}</span>

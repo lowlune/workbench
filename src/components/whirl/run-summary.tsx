@@ -9,7 +9,6 @@ import {
   IconPlayerPause,
 } from '@tabler/icons-react';
 import { classifyPart, isToolPart } from '@/components/whirl/thread/tool-data';
-import { ConveyorLoop } from '@/components/loading-ui/conveyor-loop';
 import { DotsRing } from '@/components/loading-ui/dots-ring';
 import { formatDuration } from '@/lib/format';
 import type { ActiveRun, Session } from '@/lib/types';
@@ -133,13 +132,16 @@ export function RunSummary({ session, run, onViewChanges }: {
     return () => window.clearTimeout(timer);
   }, [active, run.ended, run.id]);
 
+  /* Hooks must run on every render: compute `action` before the early return
+     so an expired card never changes the hook count (Rules of Hooks). */
+  const action = useMemo(() => currentActionOf(extended, session), [extended, session]);
+
   if (expired) return null;
 
   const elapsedMs = run.started ? Math.max(0, (run.ended || now) - run.started) : 0;
   const info = statusInfo(run.status);
   const done = todos?.filter(isDoneTodo).length || 0;
   const total = todos?.length || 0;
-  const action = useMemo(() => currentActionOf(extended, session), [extended, session]);
   const eta = active ? etaRange(extended, elapsedMs, todos) : null;
 
   const tone = info.tone;
@@ -148,7 +150,7 @@ export function RunSummary({ session, run, onViewChanges }: {
     <div
       role="status"
       className={cn(
-        'mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-[26px] border border-[var(--well-outline)] bg-(--well-translucent) px-3.5 py-2 text-[12px] backdrop-blur-xl',
+        'mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3.5 py-2 text-[12px] backdrop-blur-xl',
         tone === 'error' && 'text-destructive',
         tone === 'attention' && 'text-amber-700 dark:text-amber-300',
       )}
@@ -171,7 +173,7 @@ export function RunSummary({ session, run, onViewChanges }: {
           <span className="truncate">{action}</span>
         </span>
       ) : active ? (
-        <ConveyorLoop className="min-w-0 flex-1 text-[10px] text-muted-foreground/70" trackLength={14} />
+        <span className="min-w-0 flex-1" aria-hidden="true" />
       ) : null}
 
       {elapsedMs > 0 && (

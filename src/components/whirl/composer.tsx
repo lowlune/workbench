@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   IconArrowUp,
-  IconArrowUpRight,
   IconClipboard,
   IconLoader2,
   IconPaperclip,
@@ -33,7 +32,6 @@ export function Composer({
   floating = false,
   focusSignal = 0,
   onToast,
-  onSteer,
   meta,
 }: {
   draft: string;
@@ -53,8 +51,6 @@ export function Composer({
   /** Bump to focus the textarea — "New task" lands the caret here. */
   focusSignal?: number;
   onToast: (message: string, isError?: boolean) => void;
-  /** Send the draft into the running agent now (Codex-style steer). */
-  onSteer?: () => void;
   /** Model selector + context usage, rendered inside the capsule. */
   meta?: ReactNode;
 }) {
@@ -159,7 +155,7 @@ export function Composer({
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => { event.preventDefault(); if (!disabled) void addFiles(event.dataTransfer.files); }}
       className={cn(
-        'relative rounded-[26px] border border-[var(--well-outline)] transition-shadow duration-150 focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--foreground)_6%,transparent)]',
+        'relative rounded-3xl border border-[var(--well-outline)] transition-shadow duration-150 focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--foreground)_6%,transparent)]',
         floating ? 'bg-(--well-translucent) backdrop-blur-xl' : 'bg-well',
       )}
     >
@@ -201,7 +197,7 @@ export function Composer({
               submit();
             }
           }}
-          className="field-text block max-h-52 min-h-9 w-full resize-none overflow-y-auto bg-transparent px-1.5 py-1.5 pb-10 caret-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+          className="field-text wb-scrollbar block max-h-52 min-h-9 w-full resize-none overflow-y-auto bg-transparent px-1.5 py-1.5 pb-10 caret-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
         />
         <div className="absolute bottom-2 left-2 flex items-center">
           <input
@@ -240,17 +236,6 @@ export function Composer({
         </div>
         <div className="absolute right-2 bottom-2 flex items-center gap-1.5">
           {processing && <IconLoader2 size={15} className="animate-spin text-muted-foreground" />}
-          {isGenerating && onSteer && Boolean(draft.trim() || attachments.length) && (
-            <button
-              type="button"
-              onClick={onSteer}
-              title="Send into the running agent now — it adapts at its next step"
-              className="inline-flex h-9 cursor-pointer items-center gap-1 rounded-full bg-well px-3 text-[12px] font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.96]"
-            >
-              <IconArrowUpRight size={13} stroke={2.2} />
-              Steer
-            </button>
-          )}
           {isGenerating && onStop && (
             <button
               type="button"

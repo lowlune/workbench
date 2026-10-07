@@ -17,11 +17,11 @@ export function systemPartText(part: MessagePart) {
 }
 
 export function systemTexts(message: Message) {
-  return message.parts.filter(isSystemPart).map(systemPartText).filter(Boolean);
+  return (message.parts || []).filter(isSystemPart).map(systemPartText).filter(Boolean);
 }
 
 export function normalText(message: Message) {
-  return message.parts.filter((part) => part.type === 'text' && !isSystemPart(part)).map((part) => part.text || '').join('\n');
+  return (message.parts || []).filter((part) => part.type === 'text' && !isSystemPart(part)).map((part) => part.text || '').join('\n');
 }
 
 export function SystemMessage({ text }: { text: string }) {

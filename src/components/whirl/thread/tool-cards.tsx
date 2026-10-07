@@ -13,7 +13,7 @@ import {
   IconTerminal2,
   IconTool,
 } from '@tabler/icons-react';
-import { FileLink, type FileRef } from '@/components/whirl/file-viewer';
+import { FileLink, type FileRef } from '@/components/whirl/file-link';
 import { v2 } from '@/lib/workbench';
 import { cn } from '@/lib/utils';
 import type {
@@ -100,7 +100,7 @@ function CommandRow({ view }: { view: CommandView }) {
   const exit = view.exitCode;
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)} className="group/cmd min-w-0">
-      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden hover:bg-accent/60 [&::-webkit-details-marker]:hidden')}>
+      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden tool-row [&::-webkit-details-marker]:hidden')}>
         <IconTerminal2 size={13} className={ICON} />
         <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/70">{view.command}</code>
         {isActive(view.status)
@@ -123,7 +123,7 @@ function TestRow({ view }: { view: TestView }) {
   const total = view.passed + view.failed;
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)} className="group/test min-w-0">
-      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden hover:bg-accent/60 [&::-webkit-details-marker]:hidden')}>
+      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden tool-row [&::-webkit-details-marker]:hidden')}>
         <span className={cn('shrink-0', failed ? 'text-destructive/80' : 'text-emerald-600/80 dark:text-emerald-400/80')}>
           {isActive(view.status) ? <IconLoader2 size={13} className="animate-spin text-muted-foreground/70" /> : failed ? <IconCircleX size={13} /> : <IconCircleCheck size={13} />}
         </span>
@@ -150,7 +150,7 @@ function GitRow({ view, onOpenFile }: { view: GitView; onOpenFile?: OpenFile }) 
   }
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)} className="group/git min-w-0">
-      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden hover:bg-accent/60 [&::-webkit-details-marker]:hidden')}>
+      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden tool-row [&::-webkit-details-marker]:hidden')}>
         <IconGitBranch size={13} className={ICON} />
         <span className="shrink-0 text-foreground/70">Git changes</span>
         <span className="min-w-0 flex-1 truncate text-[11.5px]">{files.length} file{files.length === 1 ? '' : 's'}</span>
@@ -208,7 +208,7 @@ function GenericRow({ view }: { view: GenericView }) {
   const output = view.error || details?.error || view.output || details?.output || (details?.input ? JSON.stringify(details.input, null, 2) : view.input ? JSON.stringify(view.input, null, 2) : '');
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)} className="group/tool min-w-0">
-      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden hover:bg-accent/60 [&::-webkit-details-marker]:hidden')}>
+      <summary className={cn(ROW, 'cursor-pointer list-none marker:hidden tool-row [&::-webkit-details-marker]:hidden')}>
         <IconTool size={13} className={ICON} />
         <span className="shrink-0 text-foreground/70">{view.tool}</span>
         <span className="min-w-0 flex-1 truncate text-[11.5px]">{view.title}</span>

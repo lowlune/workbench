@@ -1,8 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconClipboardText, IconClock, IconHome, IconLoader2 } from '@tabler/icons-react';
 import { AgentsMdDialog } from '@/components/whirl/agents-md-dialog';
-import { ChangesPanel, type ChangesTarget } from '@/components/whirl/changes-panel';
+import type { ChangesTarget } from '@/components/whirl/changes-panel';
 import { ChatView } from '@/components/whirl/chat-view';
 import { ClipsView } from '@/components/whirl/pages/clips-view';
 import { HistoryView } from '@/components/whirl/pages/history-view';
@@ -11,21 +11,30 @@ import { NotificationsCenter } from '@/components/whirl/pages/notifications-cent
 import { RenameDialog } from '@/components/whirl/rename-dialog';
 import { SearchPalette } from '@/components/whirl/search-palette';
 import { useSessionMenu } from '@/components/whirl/session-menu';
+import { HorizontalTabs } from '@/components/whirl/tabs/horizontal-tabs';
+import { useTabsShortcuts } from '@/components/whirl/tabs/use-tabs-shortcuts';
 import { Sidebar, type AppView, type CurrentModelChip, type UsageStatusChip } from '@/components/whirl/sidebar';
-import { SystemPanel } from '@/components/whirl/system-panel';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
-import { getModels, getOverview, getSession, getSessionUpdates, getSystem, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
+import { ApiError, getModels, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
+import { useConsoleQueries } from '@/lib/use-console-queries';
+import { useSessionRepair } from '@/lib/use-session-repair';
 import type { Attachment } from '@/lib/attachments';
 import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, UsagePacing, UsageResponse, WorkbenchEvent } from '@/lib/types';
 import {
-  ACTIVE_RUN_STATES, agentInstructionFiles, archivedConversations, attentionOf, bootstrap, health,
-  isRunningSession, isTerminalRunState, mutate, notifications as fetchNotifications, offerings,
-  saveSettings, usagePacing, usageReport,
+  ACTIVE_RUN_STATES, agentInstructionFiles, attentionOf,
+  isRunningSession, isTerminalRunState, mutate,
+  runStateOf, saveSettings,
 } from '@/lib/workbench';
+import {
+  adoptServerTabs, closeAllTabs, closeOtherTabs, closeTab, forgetTabScroll, MAX_TABS, openTab,
+  reconcileTabs, reorderTabs, setTabsServerSync, togglePin, useTabs, type TabView,
+} from '@/lib/tabs';
 import { notifyForEvent } from '@/lib/notifications';
 import { cn } from '@/lib/utils';
 
 const UsageView = lazy(() => import('@/components/whirl/pages/usage-view'));
+const ChangesPanel = lazy(() => import('@/components/whirl/changes-panel').then(module => ({ default: module.ChangesPanel })));
+const SystemPanel = lazy(() => import('@/components/whirl/system-panel').then(module => ({ default: module.SystemPanel })));
 
 interface Route {
   view: AppView;
@@ -94,7 +103,7 @@ function appendDelta(session: Session, messageId: string, delta: string): Sessio
   const messages = session.messages.map((message) => {
     if (message.id !== messageId) return message;
     changed = true;
-    const parts = message.parts.length ? [...message.parts] : [];
+    const parts = message.parts?.length ? [...message.parts] : [];
     let textIndex = -1;
     for (let index = parts.length - 1; index >= 0; index -= 1) {
       if (parts[index].type === 'text') { textIndex = index; break; }
@@ -110,11 +119,11 @@ function patchToolPart(session: Session, toolCallId: string, patch: Partial<NonN
   if (!session.messages) return session;
   let changed = false;
   const messages = session.messages.map((message) => {
-    if (!message.parts.some((part) => part.callID === toolCallId)) return message;
+    if (!(message.parts || []).some((part) => part.callID === toolCallId)) return message;
     changed = true;
     return {
       ...message,
-      parts: message.parts.map((part) => part.callID === toolCallId
+      parts: (message.parts || []).map((part) => part.callID === toolCallId
         ? { ...part, state: { ...(part.state || {}), ...patch } }
         : part),
     };
@@ -162,62 +171,14 @@ export default function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const [sendingSessionId, setSendingSessionId] = useState<string>();
-  const [chatConnectionError, setChatConnectionError] = useState(false);
+  const streamConnected = useRef(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const notifiedRef = useRef<Map<string, number>>(new Map());
   const archivedOpenRef = useRef(archivedOpen);
 
-  const overviewQuery = useQuery({
-    queryKey: ['overview'],
-    queryFn: getOverview,
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: false,
-    staleTime: 2_000,
-    retry: 1,
-  });
+  const { overviewQuery, systemQuery, bootQuery, modelsQuery, pacingQuery, weeklyUsageQuery,
+    notificationsQuery, archivedQuery, healthQuery } = useConsoleQueries({ systemOpen, settingsOpen, archivedOpen });
   const overview = overviewQuery.data;
-  const systemQuery = useQuery({
-    queryKey: ['system'],
-    queryFn: getSystem,
-    refetchInterval: 20_000,
-    staleTime: 10_000,
-    retry: 1,
-  });
-  const bootQuery = useQuery({ queryKey: ['bootstrap'], queryFn: bootstrap, staleTime: 30_000 });
-  const modelsQuery = useQuery({ queryKey: ['model-offerings'], queryFn: offerings, staleTime: 60_000, retry: 1 });
-  const pacingQuery = useQuery({ queryKey: ['usage-pacing'], queryFn: usagePacing, staleTime: 30_000, retry: 1 });
-  const weeklyUsageQuery = useQuery({
-    queryKey: ['usage', '7', ''],
-    queryFn: () => usageReport(7),
-    staleTime: 30_000,
-    enabled: pacingQuery.isFetched && !pacingQuery.data,
-    retry: 1,
-  });
-  const notificationsQuery = useQuery({
-    queryKey: ['notifications'],
-    queryFn: fetchNotifications,
-    staleTime: 15_000,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
-    retry: 1,
-  });
-  const archivedQuery = useQuery({
-    queryKey: ['archived'],
-    queryFn: archivedConversations,
-    enabled: archivedOpen,
-    staleTime: 15_000,
-    retry: 1,
-  });
-  /* Live capacity for the concurrency setting (§11): how many Runs occupy a
-     worker slot and how many sit in the queue. */
-  const healthQuery = useQuery({
-    queryKey: ['health'],
-    queryFn: health,
-    refetchInterval: 10_000,
-    refetchIntervalInBackground: false,
-    staleTime: 5_000,
-    retry: 1,
-  });
 
   const agent = overview?.agents.find((item) => item.sessionId === route.sessionId);
   const liveSessionId = route.sessionId;
@@ -231,6 +192,7 @@ export default function App() {
     refetchOnWindowFocus: false,
   });
   const session = sessionQuery.data?.session;
+  const chatConnectionError = useSessionRepair(route.view === 'chat' ? liveSessionId : undefined, Boolean(session), streamConnected, mergeSession);
   const draftKey = liveSessionId || 'new-task';
   const draft = drafts[draftKey] || { text: '', attachments: [] };
 
@@ -242,6 +204,33 @@ export default function App() {
   );
 
   const activeSession = session || sessions.find((item) => item.id === route.sessionId);
+
+  /* Tabs: the store holds the working set, while the
+     active tab stays the route (`#chat/:id`). Each tab is a light, derived view
+     over overview/SSE — no second transcript is mounted. */
+  const tabs = useTabs();
+  const [extraSessions, setExtraSessions] = useState<Record<string, Session>>({});
+  const sessionById = useMemo(() => {
+    const map = new Map<string, Session>();
+    for (const item of Object.values(extraSessions)) map.set(item.id, item);
+    for (const item of sessions) map.set(item.id, item);
+    if (session) map.set(session.id, session);
+    return map;
+  }, [extraSessions, sessions, session]);
+  const tabViews = useMemo<TabView[]>(() => tabs.order.map((id) => {
+    const item = sessionById.get(id);
+    return {
+      id,
+      title: item?.title || 'Conversation',
+      status: item ? runStateOf(item) : null,
+      attention: item ? attentionOf(item) : 'none',
+      running: item ? isRunningSession(item) : false,
+      pinned: tabs.pinned.includes(id),
+      projectId: item?.projectId,
+      updated: item?.updated,
+      started: item?.activeRun?.started ?? null,
+    };
+  }), [tabs.order, tabs.pinned, sessionById]);
   /* A subtle "AGENTS.md active" hint for the open chat (§29); shares its query
      cache with the dialog. */
   const agentsIndicatorQuery = useQuery({
@@ -284,6 +273,8 @@ export default function App() {
     const seq = bootQuery.data?.seq;
     if (seq === undefined) return;
     const stream = new EventSource(`/api/v2/events?after=${seq}`);
+    stream.onopen = () => { streamConnected.current = true; };
+    stream.onerror = () => { streamConnected.current = false; };
     const timers: Record<string, number> = {};
     const schedule = (key: string, fn: () => void, ms = 150) => {
       window.clearTimeout(timers[key]);
@@ -306,6 +297,7 @@ export default function App() {
       const now = Date.now();
       if (now - (notifiedRef.current.get(key) || 0) < 30_000) return;
       notifiedRef.current.set(key, now);
+      if (notifiedRef.current.size > 200) notifiedRef.current.delete(notifiedRef.current.keys().next().value!);
       showToast(text, error);
     };
     const numberOr = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
@@ -338,7 +330,7 @@ export default function App() {
           if (conversationId && message) {
             queryClient.setQueryData<{ session: Session }>(['session', conversationId], (current) =>
               current ? { session: mergeSession(current.session, { id: conversationId, messages: [message] }) } : current);
-          }
+          } else if (conversationId) touchSession(conversationId);
           return;
         }
         case 'tool.started':
@@ -366,12 +358,23 @@ export default function App() {
         case 'todo.updated': {
           const todos = Array.isArray(data.todos) ? data.todos : undefined;
           if (conversationId && todos) {
-            patchSession(conversationId, (current) => ({ ...current, todos: todos as Session['todos'] }));
+            patchSession(conversationId, (current) => {
+              const run = current.activeRun;
+              return {
+                ...current,
+                todos: todos as Session['todos'],
+                /* Consumers prefer `activeRun.todos` for the live run, so keep
+                   both in sync or the task list shows stale todos. */
+                activeRun: run ? { ...run, todos: todos as Session['todos'] } : run,
+              };
+            });
           }
           return;
         }
         case 'run.state':
         case 'run.updated': {
+          invalidateOverview();
+          schedule('health', () => void queryClient.invalidateQueries({ queryKey: ['health'] }));
           const runId = typeof data.runId === 'string' ? data.runId
             : typeof data.commandId === 'string' ? data.commandId : undefined;
           const nextStatus = status || 'running';
@@ -508,9 +511,10 @@ export default function App() {
     };
     return () => {
       stream.close();
+      streamConnected.current = false;
       for (const timer of Object.values(timers)) window.clearTimeout(timer);
     };
-  }, [bootQuery.data?.seq, queryClient, showToast]);
+  }, [bootQuery.isSuccess, queryClient, showToast]);
 
   const navigate = useCallback((view: Exclude<AppView, 'chat'>, directory?: string | null, replace = false) => {
     if (route.view !== 'chat') setPreviousView(route.view);
@@ -548,7 +552,7 @@ export default function App() {
       await setSessionMeta(target.id, { hidden: archived });
       await queryClient.invalidateQueries({ queryKey: ['overview'] });
       if (archivedOpen) await queryClient.invalidateQueries({ queryKey: ['archived'] });
-      if (route.sessionId === target.id) navigate('home');
+      if (archived) closeTabById(target.id);
       showToast(archived ? 'Conversation archived.' : 'Conversation restored.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not archive the conversation.', true);
@@ -560,7 +564,7 @@ export default function App() {
       await mutate(`/conversations/${encodeURIComponent(target.id)}`, undefined, 'DELETE');
       await queryClient.invalidateQueries({ queryKey: ['overview'] });
       if (archivedOpen) await queryClient.invalidateQueries({ queryKey: ['archived'] });
-      if (route.sessionId === target.id) navigate('home');
+      closeTabById(target.id);
       showToast('Conversation deleted.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not delete the conversation.', true);
@@ -580,6 +584,116 @@ export default function App() {
     onViewChanges: openChangesForSession,
     onOpenAgentsMd: (selected) => setAgentsTarget(selected),
     onOpenSettings: () => openSettingsForSession(),
+  });
+
+  /* ---- Tabs ------------------------------------------------------------ */
+
+  /* Multi-device sync (P2, §6): persist the working set through settings. */
+  useEffect(() => {
+    setTabsServerSync((next) => {
+      void saveSettings({ openTabs: { order: next.order, pinned: next.pinned, activeId: next.activeId } }).catch(() => {});
+    });
+    return () => setTabsServerSync(undefined);
+  }, []);
+
+  /* Adopt another device's tabs only when this one has none of its own. */
+  const adoptedTabsRef = useRef(false);
+  useEffect(() => {
+    if (adoptedTabsRef.current || !bootQuery.isFetched) return;
+    adoptedTabsRef.current = true;
+    adoptServerTabs(bootQuery.data?.openTabs);
+  }, [bootQuery.isFetched, bootQuery.data?.openTabs]);
+
+  /* The route stays the source of truth for the active tab. */
+  useEffect(() => {
+    if (route.view !== 'chat' || !route.sessionId) return;
+    const evicted = openTab(route.sessionId);
+    if (evicted.length) showToast(`Closed ${evicted.length} idle tab${evicted.length === 1 ? '' : 's'} — ${MAX_TABS} open at most.`);
+  }, [route.view, route.sessionId, showToast]);
+
+  /* Reconcile with reality: a deleted or archived chat closes its tab (§4.2).
+     Ids beyond the overview page are verified through getSession on every pass —
+     never trusted permanently — so a conversation archived elsewhere still closes. */
+  const verifiedTabsRef = useRef<Set<string>>(new Set());
+  const tabOrderKey = tabs.order.join('|');
+  useEffect(() => {
+    if (!overview) return;
+    const known = new Set<string>();
+    for (const item of overview.sessions) known.add(item.id);
+    if (route.sessionId) known.add(route.sessionId);
+    const order = tabOrderKey ? tabOrderKey.split('|') : [];
+    /* Forget verification for tabs that are no longer open. */
+    for (const id of [...verifiedTabsRef.current]) if (!order.includes(id)) verifiedTabsRef.current.delete(id);
+    const candidates = order.filter((id) => !known.has(id));
+    if (!candidates.length) return;
+    let cancelled = false;
+    void Promise.all(candidates.map(async (id): Promise<Session | null> => {
+      try {
+        const loaded = await getSession(id);
+        if (loaded.session.hidden) { verifiedTabsRef.current.delete(id); return null; }
+        verifiedTabsRef.current.add(id);
+        return loaded.session;
+      } catch (error) {
+        /* A definitive 404/410 means it is really gone; any other failure is
+           transient, so a previously verified tab stays open. */
+        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) verifiedTabsRef.current.delete(id);
+        return null;
+      }
+    })).then((loaded) => {
+      if (cancelled) return;
+      const valid = new Set(known);
+      const extras: Record<string, Session> = {};
+      for (const item of loaded) if (item) { valid.add(item.id); extras[item.id] = item; }
+      for (const id of candidates) if (!valid.has(id) && verifiedTabsRef.current.has(id)) valid.add(id);
+      if (Object.keys(extras).length) setExtraSessions((current) => ({ ...current, ...extras }));
+      for (const id of reconcileTabs(valid)) forgetTabScroll(id);
+    });
+    return () => { cancelled = true; };
+  }, [overview, tabOrderKey, route.sessionId]);
+
+  const activeTabId = route.view === 'chat' ? route.sessionId : undefined;
+
+  const activateTab = useCallback((id: string) => {
+    if (route.view === 'chat' && route.sessionId === id) return;
+    openConversationById(id);
+  }, [route.view, route.sessionId, openConversationById]);
+
+  const closeTabById = useCallback((id: string) => {
+    const order = tabOrderKey ? tabOrderKey.split('|') : [];
+    const index = order.indexOf(id);
+    const neighbor = order[index + 1] ?? order[index - 1] ?? null;
+    const wasActive = route.sessionId === id;
+    closeTab(id);
+    forgetTabScroll(id);
+    if (wasActive) {
+      if (neighbor) openConversationById(neighbor);
+      else navigate('home');
+    }
+  }, [tabOrderKey, route.sessionId, navigate, openConversationById]);
+
+  const handleTabsReorder = useCallback((orderedIds: string[]) => reorderTabs(orderedIds), []);
+  const handleToggleTabPin = useCallback((id: string) => togglePin(id), []);
+  const handleCloseOthers = useCallback((id: string) => {
+    closeOtherTabs(id);
+    if (route.sessionId !== id) openConversationById(id);
+  }, [route.sessionId, openConversationById]);
+  const handleCloseAll = useCallback(() => {
+    const survivor = tabs.order.find((id) => tabs.pinned.includes(id)) || null;
+    closeAllTabs();
+    if (survivor) openConversationById(survivor);
+    else navigate('home');
+  }, [tabs.order, tabs.pinned, navigate, openConversationById]);
+  const handleTabContextMenu = useCallback((event: ReactMouseEvent, id: string) => {
+    const target = sessionById.get(id);
+    if (target) openSessionMenu(event, target);
+  }, [sessionById, openSessionMenu]);
+
+  useTabsShortcuts({
+    tabs: tabViews,
+    activeId: activeTabId,
+    onActivate: activateTab,
+    onClose: closeTabById,
+    onNew: openNewTask,
   });
 
   useEffect(() => {
@@ -611,46 +725,6 @@ export default function App() {
     window.addEventListener('keydown', onShortcut);
     return () => window.removeEventListener('keydown', onShortcut);
   }, [openNewTask]);
-
-  /* A slow poll remains as a repair path if the event stream is interrupted. */
-  useEffect(() => {
-    if (route.view !== 'chat' || !liveSessionId || !session) {
-      setChatConnectionError(false);
-      return;
-    }
-    let disposed = false;
-    let inFlight = false;
-    const sessionId = liveSessionId;
-    const poll = async () => {
-      if (disposed || inFlight || document.visibilityState === 'hidden') return;
-      const current = queryClient.getQueryData<{ session: Session }>(['session', sessionId])?.session;
-      if (!current) return;
-      inFlight = true;
-      try {
-        const update = await getSessionUpdates(sessionId, String(current.updated || 0));
-        if (disposed) return;
-        setChatConnectionError(false);
-        if (update.changed && update.session) {
-          queryClient.setQueryData<{ session: Session }>(['session', sessionId], (cached) => ({
-            session: mergeSession(cached?.session, update.session!),
-          }));
-        } else if (update.resumeStatus && update.resumeStatus !== current.resumeStatus) {
-          queryClient.setQueryData<{ session: Session }>(['session', sessionId], (cached) => cached ? ({
-            session: { ...cached.session, resumeStatus: update.resumeStatus },
-          }) : cached);
-        }
-      } catch {
-        if (!disposed) setChatConnectionError(true);
-      } finally { inFlight = false; }
-    };
-    const timer = window.setInterval(() => void poll(), 5000);
-    document.addEventListener('visibilitychange', poll);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', poll);
-    };
-  }, [route.view, liveSessionId, Boolean(session), queryClient]);
 
   function updateDraft(patch: Partial<DraftState>, key = draftKey) {
     setDrafts((current) => ({
@@ -794,6 +868,21 @@ export default function App() {
     }
   }
 
+  /* Rebind the conversation's workspace: project → isolated worktree, General →
+     private scratch. Takes effect on the next run. */
+  async function changeWorkspace(projectId: string | null) {
+    const sessionId = route.sessionId;
+    if (!sessionId) return;
+    try {
+      await setSessionMeta(sessionId, { projectId });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
+      await queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+      showToast(projectId ? 'Workspace set to project — the next run is isolated in its worktree.' : 'Workspace set to General — the next run uses a private scratch.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not change the workspace.', true);
+    }
+  }
+
   async function changeModel(model: string) {
     const sessionId = route.sessionId;
     if (!sessionId) return;
@@ -901,8 +990,28 @@ export default function App() {
         onMenuAt={openSessionMenuAt}
       />
 
-      <div className="min-h-0 min-w-0 flex-1 md:py-2 md:pr-2">
-        <div className="raised relative h-full overflow-hidden bg-surface md:rounded-lg md:border md:border-border">
+      <div className="min-h-0 min-w-0 flex-1 md:p-2">
+        <div className="raised relative flex h-full min-h-0 flex-col overflow-hidden bg-surface md:rounded-xl md:border md:border-border">
+          {tabViews.length > 0 && (
+            <HorizontalTabs
+              tabs={tabViews}
+              activeId={activeTabId}
+              onActivate={activateTab}
+              onClose={closeTabById}
+              onReorder={handleTabsReorder}
+              onTogglePin={handleToggleTabPin}
+              onNew={openNewTask}
+              onCloseOthers={handleCloseOthers}
+              onCloseAll={handleCloseAll}
+              onContextMenu={handleTabContextMenu}
+            />
+          )}
+          <div
+            id={route.view === 'chat' ? 'workbench-chat-panel' : undefined}
+            role={route.view === 'chat' ? 'tabpanel' : undefined}
+            aria-label={route.view === 'chat' ? 'Conversation' : undefined}
+            className="relative min-h-0 flex-1"
+          >
           {overviewQuery.isPending && !overview ? (
             <div className="grid h-full place-items-center text-muted-foreground" role="status">
               <IconLoader2 size={22} className="animate-spin" />
@@ -923,6 +1032,7 @@ export default function App() {
             </div>
           ) : route.view === 'chat' ? (
             <ChatView
+              key={liveSessionId || 'none'}
               session={session}
               agent={agent}
               loading={Boolean(liveSessionId) && sessionQuery.isPending}
@@ -949,6 +1059,8 @@ export default function App() {
               onViewChanges={openChangesForRun}
               onOpenAgentsMd={() => { if (activeSession) setAgentsTarget(activeSession); }}
               agentsMdActive={agentsMdActive}
+              projects={projects}
+              onSelectWorkspace={(id) => void changeWorkspace(id)}
             />
           ) : route.view === 'history' ? (
             <HistoryView
@@ -1001,7 +1113,7 @@ export default function App() {
                   onClick={() => navigate(view)}
                   aria-current={route.view === view ? 'page' : undefined}
                   className={cn(
-                    'grid min-h-12 justify-items-center content-center gap-0.5 rounded-lg text-[11px]',
+                    'grid min-h-12 justify-items-center content-center gap-0.5 rounded-md text-[11px]',
                     route.view === view ? 'text-foreground' : 'text-muted-foreground',
                   )}
                 >
@@ -1011,17 +1123,18 @@ export default function App() {
               ))}
             </nav>
           )}
+          </div>
         </div>
       </div>
 
-      <SystemPanel
+      {systemOpen && <Suspense fallback={null}><SystemPanel
         open={systemOpen}
         onOpenChange={setSystemOpen}
         system={systemQuery.data}
         agents={overview?.agents || []}
         onStopAgent={(selected) => void stopAgent(selected)}
         onToast={showToast}
-      />
+      /></Suspense>}
       <NotificationsCenter
         open={notificationsOpen}
         onOpenChange={setNotificationsOpen}
@@ -1030,7 +1143,7 @@ export default function App() {
       />
       {sessionMenuElement}
       {changesTarget && (
-        <ChangesPanel
+        <Suspense fallback={null}><ChangesPanel
           open
           onOpenChange={(open) => { if (!open) setChangesTarget(null); }}
           target={changesTarget}
@@ -1039,7 +1152,7 @@ export default function App() {
             if (changesTarget.conversationId) void queryClient.invalidateQueries({ queryKey: ['session', changesTarget.conversationId] });
             void queryClient.invalidateQueries({ queryKey: ['overview'] });
           }}
-        />
+        /></Suspense>
       )}
       {agentsTarget && (
         <AgentsMdDialog
@@ -1053,7 +1166,7 @@ export default function App() {
       )}
       {settingsOpen && (
         <Dialog open onOpenChange={(open) => { if (!open) setSettingsOpen(false); }}>
-          <DialogContent className="top-[24vh] max-w-sm rounded-2xl">
+          <DialogContent className="top-[24vh] max-w-sm rounded-xl">
             <DialogTitle>Concurrency & queue</DialogTitle>
             <DialogDescription>
               How many Runs may execute at once. Extra Runs wait in the queue. Currently {activeRuns} running · {queuedRuns} queued.
@@ -1067,7 +1180,7 @@ export default function App() {
                 max={16}
                 value={maxRunsDraft}
                 onChange={(event) => setMaxRunsDraft(event.target.value)}
-                className="mt-1.5 w-full rounded-xl bg-well px-3 py-2 text-[13px] tabular-nums shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none"
+                className="mt-1.5 w-full rounded-md bg-well px-3 py-2 text-[13px] tabular-nums shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none"
               />
               <p className="mt-1.5 text-[11px] text-muted-foreground">Default 2. Higher values need more memory on this machine.</p>
             </div>
@@ -1104,7 +1217,7 @@ export default function App() {
       )}
       {deleteTarget && (
         <Dialog open onOpenChange={(open) => { if (!open) setDeleteTarget(undefined); }}>
-          <DialogContent className="top-[24vh] max-w-sm rounded-2xl">
+          <DialogContent className="top-[24vh] max-w-sm rounded-xl">
             <DialogTitle>Delete conversation?</DialogTitle>
             <DialogDescription>
               “{deleteTarget.title || 'Untitled'}” and its transcript will be removed. This cannot be undone.

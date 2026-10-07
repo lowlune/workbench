@@ -139,7 +139,7 @@ async function runOnce(message) {
   function publish(message, immediate = false) {
     if (timers.has(message.id)) { if (!immediate) return; clearTimeout(timers.get(message.id)); timers.delete(message.id); }
     const dispatch = () => { timers.delete(message.id); send({ type: 'message', message }); };
-    if (immediate) dispatch(); else timers.set(message.id, setTimeout(dispatch, 80));
+    if (immediate) dispatch(); else timers.set(message.id, setTimeout(dispatch, 3000));
   }
   function content(message) {
     return (message.content || []).flatMap((part, index) => part.type === 'text'
@@ -160,8 +160,9 @@ async function runOnce(message) {
 
   session.subscribe((event) => {
     if (event.type === 'message_start' && event.message.role === 'assistant') {
-      current = { id: `pi_${message.commandId}_${++counter}`, created: Date.now(), lastText: '', info: { role: 'assistant', providerID: model.provider, modelID: model.id, modelName: model.name, contextLimit: model.contextWindow }, parts: [] };
+      current = { id: `pi_${message.commandId}_${++counter}`, created: Date.now(), lastText: '', info: { role: 'assistant', providerID: model.provider, modelID: model.id, modelName: model.name, contextLimit: model.contextWindow }, parts: [], extra: [] };
       messages.set(current.id, current);
+      publish(current, true);
     }
     if (event.type === 'message_update' && current) {
       /* Pi only exposes the accumulated assistant message, so derive the
@@ -171,12 +172,12 @@ async function runOnce(message) {
       const { delta, resync } = diffText(current.lastText || '', nextText);
       if (delta) emit({ kind: 'text.delta', messageId: current.id, delta });
       current.lastText = nextText;
-      current.parts = content(event.message);
+      current.parts = [...content(event.message), ...(current.extra || [])];
       publish(current, resync);
     }
     if (event.type === 'message_end' && event.message.role === 'assistant' && current) {
       current.lastText = textOfMessage(event.message);
-      current.parts = content(event.message);
+      current.parts = [...content(event.message), ...(current.extra || [])];
       const usage = event.message.usage;
       if (usage) {
         current.info = { ...current.info, tokens: { input: usage.input, output: usage.output, cache: { read: usage.cacheRead, write: usage.cacheWrite } }, cost: usage.cost?.total };
@@ -215,6 +216,16 @@ async function runOnce(message) {
       if (record.toolName === 'bash') emit({ kind: 'command.completed', toolCallId: event.toolCallId, command: commandArg(record.args) || '', exitCode: info.exitCode, summary: info.summary, deleted: deletedPaths.length ? deletedPaths : undefined });
       const output = event.result?.content ? textFrom(event.result) : undefined;
       patchToolPart(event.toolCallId, event.isError ? 'error' : 'completed', output, event.isError ? output : undefined);
+      /* Keep images a tool produced (e.g. `read` on a screenshot) in the turn
+         as `file` parts so the transcript can render them inline. */
+      if (current && event.result) {
+        const images = imagePartsFrom(event.result, current.id, event.toolCallId);
+        if (images.length) {
+          current.extra = [...(current.extra || []), ...images];
+          current.parts = [...current.parts, ...images];
+          publish(current, true);
+        }
+      }
     }
     if (event.type === 'auto_retry_start' || event.type === 'compaction_start') send({ type: 'activity', activity: event.type });
     if (event.type === 'agent_settled') settleResolve?.();
@@ -255,6 +266,23 @@ async function runOnce(message) {
 
 function textFrom(result) {
   return (result.content || []).filter((part) => part && part.type === 'text' && typeof part.text === 'string').map((part) => part.text).join('\n');
+}
+
+/* Image content a tool result carried (Pi returns `{ type: 'image', data,
+   mimeType }`). Turned into `file` message parts for inline rendering. */
+function imagePartsFrom(result, messageId, toolCallId) {
+  return (result?.content || []).flatMap((part, index) => {
+    if (!part || part.type !== 'image' || !part.data) return [];
+    const mime = part.mimeType || part.mime || 'image/png';
+    const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : mime === 'image/gif' ? 'gif' : 'png';
+    return [{
+      id: `${messageId}_img_${toolCallId}_${index}`,
+      type: 'file',
+      mime,
+      filename: part.filename || `${toolCallId}-${index}.${ext}`,
+      url: `data:${mime};base64,${part.data}`,
+    }];
+  });
 }
 
 process.on('message', async (message) => {

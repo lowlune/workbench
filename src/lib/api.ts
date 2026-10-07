@@ -61,16 +61,24 @@ export async function getOverview(): Promise<Overview> {
   const sessions = boot.sessions || [];
   const agents: Agent[] = sessions
     .filter((session) => session.resumeStatus === 'working')
-    .map((session) => ({
-      paneId: session.id,
-      agent: session.engine || 'opencode',
-      status: 'working',
-      title: session.title || 'Conversation',
-      cwd: session.directory,
-      sessionId: session.id,
-      sessionTitle: session.title || null,
-      updated: session.updated || null,
-    }));
+    .map((session) => {
+      /* Mirror attentionOf(): a pending permission interaction (or a waiting
+         run) must surface as `blocked` so ChatView's approval banner shows. */
+      const blocked = session.attention === 'permission'
+        || session.status === 'blocked'
+        || session.activeRun?.status === 'waiting_for_permission'
+        || (session.interactions || []).some((item) => item.kind === 'permission');
+      return {
+        paneId: session.id,
+        agent: session.engine || 'opencode',
+        status: blocked ? 'blocked' : 'working',
+        title: session.title || 'Conversation',
+        cwd: session.directory,
+        sessionId: session.id,
+        sessionTitle: session.title || null,
+        updated: session.updated || null,
+      };
+    });
   const directories = [
     { name: 'Home workspace', directory: '/home' },
     ...(boot.projects || []).map((project) => ({ name: project.name, directory: project.directory })),
@@ -147,7 +155,7 @@ async function patchConversation(sessionId: string, patch: Record<string, unknow
   });
 }
 
-export async function setSessionMeta(sessionId: string, patch: { title?: string | null; pinned?: boolean; hidden?: boolean }) {
+export async function setSessionMeta(sessionId: string, patch: { title?: string | null; pinned?: boolean; hidden?: boolean; projectId?: string | null; directory?: string | null; workspace?: string | null }) {
   const result = await patchConversation(sessionId, patch);
   return {
     sessionId,

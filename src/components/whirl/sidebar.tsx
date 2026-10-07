@@ -104,8 +104,8 @@ export function Sidebar({
   }, [filter, onToggleArchived]);
 
   return (
-    <aside className="hidden h-full w-[17rem] shrink-0 flex-col gap-2 px-3 pt-3 pb-2 md:flex" aria-label="Workspace navigation">
-      <div className="flex h-7 items-center gap-1 px-1.5">
+    <aside className="hidden h-full w-[17rem] shrink-0 flex-col gap-1 px-2 pt-2 pb-2 md:flex" aria-label="Workspace navigation">
+      <div className="flex h-7 items-center gap-1 px-1">
         <span className="text-[13px] font-semibold tracking-tight">Workbench</span>
         <button
           type="button"
@@ -136,7 +136,7 @@ export function Sidebar({
         type="button"
         onClick={onOpenUsage}
         title="Current provider, model and usage"
-        className="flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12px] transition-colors duration-150 hover:bg-accent"
+        className="flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-accent"
       >
         <IconBolt size={14} className="shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-left">
@@ -157,7 +157,7 @@ export function Sidebar({
       <button
         type="button"
         onClick={onNewTask}
-        className="flex h-8 w-full cursor-pointer items-center justify-start gap-2 rounded-lg px-2 text-[13px] font-medium text-foreground transition-colors duration-150 hover:bg-accent"
+        className="flex h-8 w-full cursor-pointer items-center justify-start gap-2 rounded-md px-2 text-[13px] font-medium text-foreground transition-colors duration-150 hover:bg-accent"
       >
         <IconPlus size={16} stroke={2.4} />
         New task
@@ -190,7 +190,7 @@ export function Sidebar({
         ))}
       </div>
 
-      <div className="wb-scroll -mx-1 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-1 pb-2">
+      <div className="wb-scroll -mx-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-1 pb-1">
         {filter === 'archived' ? (
           <ArchivedList
             sessions={archived}
@@ -265,19 +265,19 @@ export function Sidebar({
         )}
       </div>
 
-      <footer className="mt-auto flex items-center gap-1 border-t border-border px-1 pt-2">
+      <footer className="mt-auto flex items-center gap-1 border-t border-border px-1 pt-1.5">
         <button
           type="button"
           onClick={onToggleTheme}
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          className="grid size-7 cursor-pointer place-items-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
         >
           {theme === 'dark' ? <IconSun size={15} /> : <IconMoon size={15} />}
         </button>
         <a
           href="/logout"
           aria-label="Sign out"
-          className="grid size-7 place-items-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
         >
           <IconLogout size={15} />
         </a>
@@ -292,7 +292,7 @@ export function Sidebar({
 
 /* Whirl's date markers: quiet labels above each run of rows. */
 function SectionLabel({ children }: { children: string }) {
-  return <div className="flex h-5 items-center px-2.5 text-[10.5px]/4 font-medium text-muted-foreground/55">{children}</div>;
+  return <div className="flex h-4 items-center px-2.5 text-[10.5px]/4 font-medium text-muted-foreground/55">{children}</div>;
 }
 
 function ArchivedList({
@@ -377,7 +377,7 @@ function SidebarRow({
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
       className={cn(
-        'group/row flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] transition-colors duration-100',
+        'group/row flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] transition-colors duration-100',
         active ? 'bg-accent font-medium text-foreground' : 'text-foreground-soft hover:bg-accent hover:text-foreground',
       )}
     >
@@ -420,12 +420,12 @@ function RunRow({
   const meta = [label, todos.length ? `${done}/${todos.length}` : '', elapsed].filter(Boolean).join(' · ');
 
   return (
-    <div data-session-row={session.id} className={cn('group/row relative flex w-full min-w-0 items-center rounded-lg transition-colors duration-100', active ? 'bg-accent' : 'hover:bg-accent')}>
+    <div data-session-row={session.id} className={cn('group/row relative flex w-full min-w-0 items-center rounded-md transition-colors duration-100', active ? 'bg-accent' : 'hover:bg-accent')}>
       <button
         type="button"
         onClick={() => onOpen(session)}
         onContextMenu={(event) => onContextMenu?.(event, session)}
-        className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-lg py-1.5 pr-7 pl-2 text-left"
+        className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-md py-1.5 pr-7 pl-2 text-left"
       >
         <span className="mt-[3px] flex size-3.5 shrink-0 items-center justify-center">
           {working ? (

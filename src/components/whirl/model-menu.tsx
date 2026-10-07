@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { IconCheck, IconCpu, IconLoader2, IconSearch } from '@tabler/icons-react';
+import { IconCheck, IconLoader2, IconSearch } from '@tabler/icons-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { getModels } from '@/lib/api';
 import { formatTokens } from '@/lib/format';
@@ -64,9 +64,7 @@ export function ModelMenu({
                 : 'raised h-8 max-w-60 bg-(--popover-translucent) px-3 text-[12px] font-medium backdrop-blur-sm ring-1 ring-border',
             )}
           >
-            <IconCpu size={14} className="shrink-0 text-muted-foreground" />
             <span className="truncate">{displayName || 'Choose model'}</span>
-            {context.percent > 0 && !compact && <span className="shrink-0 tabular-nums text-muted-foreground">{context.percent}%</span>}
           </button>
         }
       />
@@ -123,7 +121,7 @@ export function ModelMenu({
                   setOpen(false);
                   onSelect(item.id);
                 }}
-                className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors duration-75 hover:bg-accent"
+                className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors duration-75 hover:bg-accent"
               >
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px]">{item.name}</span>

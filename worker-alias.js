@@ -1,11 +1,9 @@
 export default {
-  async fetch(request, env) {
+  async fetch(request) {
     const url = new URL(request.url);
-    if (url.protocol !== 'https:') {
-      url.protocol = 'https:';
-      url.port = '';
-      return Response.redirect(url, 308);
-    }
-    return env.WORKBENCH.fetch(request);
+    url.protocol = 'https:';
+    url.hostname = 'w.ocu.workers.dev';
+    url.port = '';
+    return Response.redirect(url, 308);
   },
 };

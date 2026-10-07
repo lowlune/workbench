@@ -56,7 +56,7 @@ export function ClipsView({ onToast }: { onToast: (message: string, isError?: bo
         <h1 className="px-1 text-[20px] font-semibold tracking-tight">Clipboard</h1>
         <p className="mt-1 px-1 text-[13px] text-muted-foreground">Snips and screenshots that sync between your devices.</p>
 
-        <div className="mt-5 rounded-[26px] bg-well p-2 shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
+        <div className="mt-5 rounded-3xl bg-well p-2 shadow-[inset_0_0_0_1px_var(--well-outline),inset_0_1px_0_0_var(--well-highlight)]">
           <textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
@@ -91,7 +91,7 @@ export function ClipsView({ onToast }: { onToast: (message: string, isError?: bo
             </div>
           ) : (
             clips.map((clip) => (
-              <article key={clip.id} className="group/clip rounded-2xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
+              <article key={clip.id} className="group/clip rounded-xl bg-well p-3.5 shadow-[inset_0_0_0_1px_var(--well-outline)]">
                 {clip.kind === 'image' ? (
                   <img src={clip.dataUrl} alt="Image clip" className="max-h-72 w-full rounded-xl object-contain" loading="lazy" />
                 ) : (
