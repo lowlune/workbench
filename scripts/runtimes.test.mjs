@@ -43,6 +43,19 @@ test('OpenCode adapter owns separate sandboxed servers for concurrent same-folde
   for (const child of children) assert.ok(child.exitCode !== null || child.signalCode);
 });
 
+test('OpenCode runtime close resolves within its deadline (no stop hang)', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  const binary = `${f.home}/.opencode/bin/opencode`;
+  writeFileSync(binary, readFileSync(new URL('./fixtures/fake-opencode.mjs', import.meta.url)), { mode: 0o700 });
+  process.env.WORKBENCH_OPENCODE_BIN = binary;
+  const runtime = new OpenCodeRuntime(f);
+  await runtime.start();
+  const started = Date.now();
+  await runtime.close();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 8000, `close() took ${elapsed}ms`);
+});
+
 test('a transient OpenCode startup failure does not permanently disable the shared runtime', { timeout: 30000 }, async t => {
   const f = fixture(t);
   const binary = `${f.home}/.opencode/bin/opencode`;

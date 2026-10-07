@@ -16,6 +16,7 @@
     "test": "node --disable-warning=ExperimentalWarning --test scripts/*.test.mjs",
     "test:runtime": "node scripts/workbench.smoke.mjs",
     "test:ui": "node --disable-warning=ExperimentalWarning scripts/workbench.ui-e2e.mjs",
+    "test:edge": "node --disable-warning=ExperimentalWarning scripts/workbench.edge-e2e.mjs",
     "backup": "node --disable-warning=ExperimentalWarning scripts/backup-workbench.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:alias": "wrangler deploy --config wrangler.alias.jsonc",

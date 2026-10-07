@@ -405,8 +405,18 @@ export class OpenCodeRuntime {
       else handle.controller.abort('shutdown');
     }
     const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode) return;
-    await new Promise(resolve => { child.once('close', resolve); terminateGroup(child); });
+    this.child = null;
+    if (!child) return;
+    if (child.exitCode !== null || child.signalCode) return;
+    // Bound the wait: a child that ignores TERM, or that exits between the check
+    // above and the listener attach, must never hang the caller (POST /stop).
+    await new Promise(resolve => {
+      let settled = false;
+      const done = () => { if (settled) return; settled = true; resolve(); };
+      child.once('close', done); child.once('exit', done);
+      const timer = setTimeout(done, 4000); timer.unref?.();
+      terminateGroup(child);
+    });
   }
 }
 
