@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
-import { agentEnv, workspaceGuard, sandboxSpawn, terminateGroup } from '../server/security.mjs';
+import { agentEnv, workspaceGuard, sandboxSpawn, terminateGroup, sandboxEnabled } from '../server/security.mjs';
 import { needsPermission } from '../server/pi/tools.mjs';
 
 function fixture(t) {
@@ -24,6 +24,17 @@ function collect(child) {
     child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
   });
 }
+
+test('WORKBENCH_SANDBOX=off runs the agent directly (no bubblewrap)', async t => {
+  const old = process.env.WORKBENCH_SANDBOX;
+  process.env.WORKBENCH_SANDBOX = 'off';
+  t.after(() => { if (old === undefined) delete process.env.WORKBENCH_SANDBOX; else process.env.WORKBENCH_SANDBOX = old; });
+  assert.equal(sandboxEnabled(), false);
+  const f = fixture(t);
+  const result = await collect(sandboxSpawn(process.execPath, ['-e', 'console.log("direct")'], { ...f, workspace: f.general }, { stdio: ['ignore', 'pipe', 'pipe'] }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /direct/);
+});
 
 test('environment allowlist removes control/cloud/provider/shell injection secrets', () => {
   assert.deepEqual(agentEnv({ HOME: '/home/u', PATH: '/usr/bin', WORKBENCH_PROXY_KEY: 's', CLOUDFLARE_API_TOKEN: 's', OPENAI_API_KEY: 's', BASH_ENV: '/evil', NODE_OPTIONS: '--require=evil', AWS_SECRET_ACCESS_KEY: 's' }), { HOME: '/home/u', PATH: '/usr/bin' });

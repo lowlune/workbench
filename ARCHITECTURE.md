@@ -77,9 +77,12 @@
 
 * Edge cookies and internal proxy keys are distinct credentials. Incoming proxy
   headers are replaced at the authenticated edge. Internal key checks fail closed.
-* Bubblewrap is mandatory for agent execution: explicit read-only system/home/app
+* Bubblewrap isolates agent execution by default: explicit read-only system/home/app
   mounts, isolated PID namespace and `/tmp`, private `/proc`/`/dev`, and writable
-  workspace/native state mounts. Do not silently fall back to an unrestricted run.
+  workspace/native state mounts. There is one explicit, reversible escape hatch:
+  `WORKBENCH_SANDBOX=off` (or `0`/`false`) runs agents directly on the host with
+  full filesystem access and no secret masks, for operators who deliberately need
+  it. It is never a silent fallback — the switch is set in the service environment.
   Name resolution is part of the sandbox contract: `/etc/resolv.conf` is commonly
   a symlink into `/run` (systemd-resolved), so the sandbox snapshots that file and
   read-only-overlays `/etc` with it. The `/run` directory itself is never mounted

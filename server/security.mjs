@@ -39,10 +39,18 @@ export function workspaceGuard(root, event) {
   }
 }
 
+/* Bubblewrap isolation is on by default. Set WORKBENCH_SANDBOX=off (or 0/false)
+   to run agents directly on the host: full filesystem access, no secret masks.
+   This is a deliberate, reversible escape hatch — off means an agent can read
+   every credential and write anywhere the Workbench user can. */
+export function sandboxEnabled() {
+  return !['0', 'false', 'off', 'no'].includes(String(process.env.WORKBENCH_SANDBOX ?? '').trim().toLowerCase());
+}
+
 let ready;
 export function requireSandbox() {
+  if (!sandboxEnabled()) return;
   if (ready) return;
-  if (['0', 'false'].includes(process.env.WORKBENCH_SANDBOX)) throw new Error('Agent execution requires bubblewrap; remove WORKBENCH_SANDBOX=0.');
   try {
     execFileSync('/usr/bin/bwrap', ['--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64', '--unshare-pid', '--proc', '/proc', '--dev', '/dev', '--', '/bin/true'], { timeout: 5000, stdio: 'pipe', env: agentEnv() });
     ready = true;
@@ -140,9 +148,13 @@ export function sandboxArgs({ workspace, dataDir, readOnly = false, extraRw = []
 
 export function sandboxSpawn(command, argv, sandbox, options = {}) {
   requireSandbox();
+  const { runtimeEnv = {}, ...spawnOptions } = options;
+  if (!sandboxEnabled()) {
+    // WORKBENCH_SANDBOX=off: run the agent directly on the host (no bwrap).
+    return spawn(command, argv, { ...spawnOptions, detached: true, env: { ...agentEnv(options.env), ...runtimeEnv } });
+  }
   const ownedResolv = sandbox.resolvConfDir ? null : resolvConfOverlay();
   const resolvConfDir = sandbox.resolvConfDir || ownedResolv;
-  const { runtimeEnv = {}, ...spawnOptions } = options;
   let child;
   try {
     child = spawn('/usr/bin/bwrap', [...sandboxArgs({ ...sandbox, resolvConfDir }), '--', command, ...argv], { ...spawnOptions, detached: true, env: { ...agentEnv(options.env), ...runtimeEnv } });
