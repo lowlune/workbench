@@ -9,9 +9,9 @@ function fixture(t) {
   const root = mkdtempSync('/tmp/opencode/wb-security-');
   const home = path.join(root, 'home'); const dataDir = path.join(home, 'control');
   const general = path.join(dataDir, 'general');
-  for (const dir of [general, `${home}/.config/secrets`, `${home}/.ssh`, `${home}/.aws`, `${home}/outside`, `${home}/.config/gh`, `${home}/.local/share/opencode`, `${home}/.docker`, `${home}/.kube`, `${home}/.config/systemd/user`, `${home}/.local/bin`, `${dataDir}/pi`]) mkdirSync(dir, { recursive: true });
+  for (const dir of [general, `${home}/.config/secrets`, `${home}/.ssh`, `${home}/.aws`, `${home}/outside`, `${home}/.config/gh`, `${home}/.local/share/opencode`, `${home}/.docker`, `${home}/.kube`, `${home}/.config/systemd/user`, `${home}/.config/autostart`, `${home}/.config/environment.d`, `${home}/.local/bin`, `${dataDir}/pi`]) mkdirSync(dir, { recursive: true });
   for (const file of ['.config/secrets/canary', '.ssh/canary', '.aws/canary', '.netrc', '.git-credentials', 'control/workbench.sqlite', '.config/gh/hosts.yml', '.local/share/opencode/mcp-auth.json', '.docker/config.json', '.kube/config', '.npmrc', '.pypirc']) writeFileSync(`${home}/${file}`, 'SECRET_CANARY');
-  for (const file of ['.bashrc', '.profile']) writeFileSync(`${home}/${file}`, 'ORIGINAL');
+  for (const file of ['.bashrc', '.bash_profile', '.profile', '.zshrc']) writeFileSync(`${home}/${file}`, 'ORIGINAL');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return { root, home, dataDir, general };
 }

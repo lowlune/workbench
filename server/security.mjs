@@ -108,17 +108,17 @@ export function sandboxArgs({ workspace, dataDir, readOnly = false, extraRw = []
     mount(readOnly ? '--ro-bind' : '--bind', workspace);
   }
   // Apply masks last so a writable home/workspace cannot expose them again.
-  // Roots the sandbox may write to. A missing mask target can only be
-  // materialised by bubblewrap when its parent is writable; otherwise the
-  // create fails with EROFS and would abort the whole spawn.
-  const writableRoots = [...(readOnly ? [] : [workspace, ...extraRw]), ...runtimeRw];
-  const canMaterialize = target => writableRoots.some(root => insideDir(root, target));
-  const applyMask = (target, forceDirectory) => {
-    const exists = existsSync(target);
-    if (!exists && !canMaterialize(target)) return;
-    const isDirectory = exists ? statSync(target).isDirectory() : forceDirectory;
+  // Only mask paths that EXIST: bubblewrap must create the mount point, and a
+  // missing target under a read-only parent (e.g. a home that is not the
+  // workspace) aborts the whole spawn with "Read-only file system". Nothing
+  // exists at a missing path, so there is nothing to leak; a path the agent can
+  // create inside a writable workspace is its own file, not a credential.
+  const applyMask = (target) => {
+    if (!existsSync(target)) return;
+    let isDirectory = false;
+    try { isDirectory = statSync(target).isDirectory(); } catch { return; }
     const values = new Set([target]);
-    if (exists) { try { values.add(realpathSync(target)); } catch {} }
+    try { values.add(realpathSync(target)); } catch {}
     for (const value of values) {
       if (isDirectory) args.push('--tmpfs', value);
       else args.push('--ro-bind', '/dev/null', value);
@@ -126,13 +126,14 @@ export function sandboxArgs({ workspace, dataDir, readOnly = false, extraRw = []
   };
   // Credential stores the agent must never read.
   for (const target of [path.join(home, '.config/secrets'), path.join(home, '.ssh'), path.join(home, '.aws'), path.join(home, '.netrc'), path.join(home, '.git-credentials'), path.join(home, '.config/gcloud'), path.join(home, '.config/.wrangler'), path.join(home, '.wrangler'), path.join(home, '.config/gh'), path.join(home, '.local/share/opencode/mcp-auth.json'), path.join(home, '.docker'), path.join(home, '.kube'), path.join(home, '.npmrc'), path.join(home, '.pypirc')]) {
-    applyMask(target, false);
+    applyMask(target);
   }
   // Shell startup files and user service definitions are persistence vectors
   // OUTSIDE the sandbox whenever HOME (or an ancestor) is the workspace, since
-  // that re-binds home read-write. Mask them even then.
-  for (const target of [path.join(home, '.bashrc'), path.join(home, '.bash_profile'), path.join(home, '.profile'), path.join(home, '.zshrc')]) applyMask(target, false);
-  for (const target of [path.join(home, '.config/systemd/user'), path.join(home, '.config/autostart'), path.join(home, '.config/environment.d'), path.join(home, '.local/bin')]) applyMask(target, true);
+  // that re-binds home read-write. Mask them even then (when present).
+  for (const target of [path.join(home, '.bashrc'), path.join(home, '.bash_profile'), path.join(home, '.profile'), path.join(home, '.zshrc'), path.join(home, '.config/systemd/user'), path.join(home, '.config/autostart'), path.join(home, '.config/environment.d'), path.join(home, '.local/bin')]) {
+    applyMask(target);
+  }
   args.push('--setenv', 'XDG_CACHE_HOME', '/tmp/.cache', '--setenv', 'npm_config_cache', '/tmp/.npm', '--setenv', 'PIP_CACHE_DIR', '/tmp/.pip', '--chdir', workspace);
   return args;
 }
