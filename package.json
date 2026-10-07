@@ -15,6 +15,7 @@
     "check": "node scripts/check-runtime.mjs && node --check server.js && node --check worker.js && node --check worker-alias.js && node --check public/login.js && node --check scripts/sync-ui-assets.mjs && node --check scripts/promote-ui-build.mjs && node scripts/check-radius.mjs && tsc --noEmit",
     "test": "node --disable-warning=ExperimentalWarning --test scripts/*.test.mjs",
     "test:runtime": "node scripts/workbench.smoke.mjs",
+    "test:ui": "node --disable-warning=ExperimentalWarning scripts/workbench.ui-e2e.mjs",
     "backup": "node --disable-warning=ExperimentalWarning scripts/backup-workbench.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:alias": "wrangler deploy --config wrangler.alias.jsonc",
