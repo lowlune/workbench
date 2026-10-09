@@ -32,6 +32,9 @@ export function HomeView({
   onMenuAt,
   focusSignal,
   onStart,
+  defaultEngine,
+  defaults,
+  onDefaultEngine,
 }: {
   overview: Overview;
   draft: string;
@@ -40,6 +43,9 @@ export function HomeView({
   onDraftChange: (value: string) => void;
   onAttachmentsChange: (value: Attachment[]) => void;
   onStart: (input: { directory: string; kind: 'opencode' | 'pi' }) => Promise<void>;
+  defaultEngine: 'opencode' | 'pi';
+  defaults?: Partial<Record<'opencode' | 'pi', string | null>>;
+  onDefaultEngine: (engine: 'opencode' | 'pi') => void;
   onNewTask: () => void;
   onOpenSession: (session: Session) => void;
   onOpenAgent: (agent: Agent) => void;
@@ -56,7 +62,8 @@ export function HomeView({
   /* ChatGPT-style: the project is a chip on the composer, defaulting to the
      one last used. No dialog in the way of typing the first message. */
   const [directory, setDirectory] = useState('');
-  const [kind, setKind] = useState<'opencode' | 'pi'>('opencode');
+  const [kind, setKind] = useState<'opencode' | 'pi'>(defaultEngine);
+  useEffect(() => { setKind(defaultEngine); }, [defaultEngine]);
   useEffect(() => {
     if (!directories.length) return;
     setDirectory((current) => {
@@ -75,7 +82,12 @@ export function HomeView({
         <HomeGreeting />
         <div className="mb-2 flex items-center gap-1.5 px-1">
           <ProjectChip directories={directories} value={directory} onChange={setDirectory} />
-          <KindChip value={kind} onChange={setKind} />
+          <KindChip value={kind} onChange={(next) => { setKind(next); onDefaultEngine(next); }} />
+          {defaults?.[kind] && (
+            <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={defaults[kind] || undefined}>
+              · {defaults[kind]!.split('/').pop()}
+            </span>
+          )}
           {sending && <span className="ml-auto text-[11px] text-muted-foreground">Starting…</span>}
         </div>
         <Composer

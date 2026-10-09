@@ -106,13 +106,22 @@ export function Sidebar({
   return (
     <aside className="hidden h-full w-[17rem] shrink-0 flex-col gap-1 px-2 pt-2 pb-2 md:flex" aria-label="Workspace navigation">
       <div className="flex h-7 items-center gap-1 px-1">
-        <span className="text-[13px] font-semibold tracking-tight">Workbench</span>
+        <span className="text-[13px] font-semibold tracking-tight">W</span>
+        <button
+          type="button"
+          onClick={onOpenSystem}
+          aria-expanded={systemOpen}
+          title="System performance"
+          className="ml-auto inline-flex cursor-pointer items-center rounded-full px-1.5 py-1 text-[10px] whitespace-nowrap tabular-nums text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+        >
+          {system?.cpu ? `CPU ${system.cpu.percent}% · RAM ${system.memoryPercent ?? 0}%` : 'System…'}
+        </button>
         <button
           type="button"
           onClick={onOpenNotifications}
           aria-label={unreadNotifications ? `${unreadNotifications} unread notifications` : 'Notifications'}
           title="Notifications"
-          className="relative ml-auto grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="relative grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
         >
           <IconBell size={15} />
           {Boolean(unreadNotifications) && (
@@ -120,15 +129,6 @@ export function Sidebar({
               {unreadNotifications! > 9 ? '9+' : unreadNotifications}
             </span>
           )}
-        </button>
-        <button
-          type="button"
-          onClick={onOpenSystem}
-          aria-expanded={systemOpen}
-          title="System performance"
-          className="inline-flex cursor-pointer items-center rounded-full px-1.5 py-1 text-[10px] whitespace-nowrap tabular-nums text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
-        >
-          {system?.cpu ? `CPU ${system.cpu.percent}% · RAM ${system.memoryPercent ?? 0}%` : 'System…'}
         </button>
       </div>
 

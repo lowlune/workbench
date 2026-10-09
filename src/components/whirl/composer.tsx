@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type 
 import {
   IconArrowUp,
   IconClipboard,
+  IconFile,
   IconLoader2,
   IconPaperclip,
   IconPlayerStopFilled,
@@ -9,7 +10,7 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { fileToDataUrl, type Attachment } from '@/lib/attachments';
+import { uploadAttachment, type Attachment } from '@/lib/attachments';
 import { cn } from '@/lib/utils';
 
 const MAX_ATTACHMENTS = 4;
@@ -83,15 +84,15 @@ export function Composer({
     const incoming = Array.from(files);
     if (!incoming.length) return;
     if (attachments.length + incoming.length > MAX_ATTACHMENTS) {
-      onToast(`Attach up to ${MAX_ATTACHMENTS} images at a time.`, true);
+      onToast(`Attach up to ${MAX_ATTACHMENTS} files at a time.`, true);
       return;
     }
     setProcessing(true);
     try {
-      const next = await Promise.all(incoming.map(fileToDataUrl));
+      const next = await Promise.all(incoming.map(uploadAttachment));
       onAttachmentsChange([...attachments, ...next]);
     } catch (error) {
-      onToast(error instanceof Error ? error.message : 'Could not read that image.', true);
+      onToast(error instanceof Error ? error.message : 'Could not upload that file.', true);
     } finally {
       setProcessing(false);
     }
@@ -161,20 +162,30 @@ export function Composer({
     >
       <div className="relative p-2">
         {attachments.length > 0 && (
-          <div className="mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached images">
-            {attachments.map((attachment, index) => (
-              <div key={`${attachment.name}-${index}`} className="relative size-16 overflow-hidden rounded-xl shadow-[inset_0_0_0_1px_var(--well-outline)]">
-                <img src={attachment.dataUrl} alt={attachment.name} className="size-full object-cover" />
-                <button
-                  type="button"
-                  aria-label={`Remove ${attachment.name}`}
-                  onClick={() => onAttachmentsChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
-                  className="absolute top-1 right-1 grid size-5 cursor-pointer place-items-center rounded-full bg-black/70 text-white transition-colors hover:bg-black"
-                >
-                  <IconX size={11} stroke={2.5} />
-                </button>
-              </div>
-            ))}
+          <div className="mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached files">
+            {attachments.map((attachment, index) => {
+              const isImage = Boolean(attachment.mime?.startsWith('image/'));
+              return (
+                <div key={`${attachment.name}-${index}`} className="relative size-16 overflow-hidden rounded-xl shadow-[inset_0_0_0_1px_var(--well-outline)]">
+                  {isImage ? (
+                    <img src={attachment.dataUrl} alt={attachment.name} className="size-full object-cover" />
+                  ) : (
+                    <div className="flex size-full flex-col items-center justify-center gap-1 bg-well px-1.5 text-center">
+                      <IconFile size={18} className="shrink-0 text-muted-foreground" />
+                      <span className="line-clamp-2 w-full break-all text-[9px]/3 text-muted-foreground">{attachment.name}</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${attachment.name}`}
+                    onClick={() => onAttachmentsChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
+                    className="absolute top-1 right-1 grid size-5 cursor-pointer place-items-center rounded-full bg-black/70 text-white transition-colors hover:bg-black"
+                  >
+                    <IconX size={11} stroke={2.5} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
         <label htmlFor="wb-composer" className="sr-only">Message your agent</label>
@@ -205,9 +216,8 @@ export function Composer({
             tabIndex={-1}
             className="sr-only"
             type="file"
-            accept="image/jpeg,image/png,image/webp,image/gif"
             multiple
-            aria-label="Choose images to attach"
+            aria-label="Choose files to attach"
             disabled={disabled || processing}
             onChange={(event) => {
               if (event.target.files?.length) void addFiles(event.target.files);
@@ -228,7 +238,7 @@ export function Composer({
               <IconPlus size={17} stroke={2.2} />
             </PopoverTrigger>
             <PopoverContent side="top" align="start" className="w-56 p-1">
-              <MenuItem icon={<IconPaperclip size={15} />} label="Upload image" onClick={() => fileRef.current?.click()} />
+              <MenuItem icon={<IconPaperclip size={15} />} label="Upload file" onClick={() => fileRef.current?.click()} />
               <MenuItem icon={<IconClipboard size={15} />} label="Paste from clipboard" onClick={() => void pasteFromClipboard()} />
             </PopoverContent>
           </Popover>

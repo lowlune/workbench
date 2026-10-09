@@ -15,7 +15,7 @@ import { HorizontalTabs } from '@/components/whirl/tabs/horizontal-tabs';
 import { useTabsShortcuts } from '@/components/whirl/tabs/use-tabs-shortcuts';
 import { Sidebar, type AppView, type CurrentModelChip, type UsageStatusChip } from '@/components/whirl/sidebar';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
-import { ApiError, getModels, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
+import { ApiError, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
 import { useConsoleQueries } from '@/lib/use-console-queries';
 import { useSessionRepair } from '@/lib/use-session-repair';
 import type { Attachment } from '@/lib/attachments';
@@ -177,7 +177,7 @@ export default function App() {
   const archivedOpenRef = useRef(archivedOpen);
 
   const { overviewQuery, systemQuery, bootQuery, modelsQuery, pacingQuery, weeklyUsageQuery,
-    notificationsQuery, archivedQuery, healthQuery } = useConsoleQueries({ systemOpen, settingsOpen, archivedOpen });
+    notificationsQuery, archivedQuery, healthQuery } = useConsoleQueries({ settingsOpen, archivedOpen });
   const overview = overviewQuery.data;
 
   const agent = overview?.agents.find((item) => item.sessionId === route.sessionId);
@@ -772,28 +772,22 @@ export default function App() {
     }
     setSendingSessionId('new-task');
     try {
-      const boot = bootQuery.data;
       const projectId = projectIdForDirectory(directory);
-      let model = boot?.projects.find((project) => project.id === projectId)?.defaults?.[kind] || boot?.defaults?.[kind] || null;
-      if (!model) {
-        const models = await getModels();
-        model = models.models[0]?.id || null;
-      }
-      if (!model) throw new Error('No connected model. Add one in Usage & models.');
       const id = `chat_${crypto.randomUUID()}`;
+      /* No model from the client: the control plane resolves the harness's
+         current default, so a just-changed default always wins over a stale
+         bootstrap copy. */
       const created = await mutate<{ session: Session }>('/conversations', {
         id,
         title: text.slice(0, 80),
         engine: kind,
         projectId,
-        model,
         mode: 'build',
       });
       await mutate(`/conversations/${id}/commands`, {
         clientCommandId: crypto.randomUUID(),
         text,
         attachmentIds: attachmentIds(currentDraft.attachments),
-        model,
       });
       try { localStorage.setItem('workbench-last-directory', directory); } catch { /* Preference is optional. */ }
       setDrafts((current) => ({ ...current, 'new-task': { text: '', attachments: [] } }));
@@ -1086,6 +1080,9 @@ export default function App() {
               onDraftChange={(text) => updateDraft({ text })}
               onAttachmentsChange={(attachments) => updateDraft({ attachments })}
               onStart={startTask}
+              defaultEngine={bootQuery.data?.defaultEngine || 'pi'}
+              defaults={bootQuery.data?.defaults}
+              onDefaultEngine={(engine) => { void mutate('/settings', { defaultEngine: engine }).then(() => queryClient.invalidateQueries({ queryKey: ['bootstrap'] })); }}
               focusSignal={taskFocusSignal}
               onNewTask={openNewTask}
               onOpenSession={openSession}

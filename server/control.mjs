@@ -76,7 +76,27 @@ const key = process.env.WORKBENCH_PROXY_KEY || secrets.WORKBENCH_PROXY_KEY;
 if (!key) throw new Error('WORKBENCH_PROXY_KEY is required.');
 const store = new Store(CONTROL);
 const oc = new OpenCodeRuntime({ dataDir: CONTROL });
-const pi = new PiRuntime({ dataDir: CONTROL });
+let sharedOAuthSyncQueue = Promise.resolve();
+const pi = new PiRuntime({
+  dataDir: CONTROL,
+  syncSharedOAuthCredential: async ({ provider, credential }) => {
+    if (provider !== 'openai' || credential?.type !== 'oauth'
+      || typeof credential.access !== 'string' || typeof credential.refresh !== 'string'
+      || !Number.isFinite(credential.expires)) throw new Error('Unsupported shared OAuth credential.');
+    const update = async () => {
+      const auth = await readAuth();
+      const current = auth.openai;
+      if (current?.type !== 'oauth') throw new Error('The OpenAI OAuth connection is no longer available in OpenCode.');
+      /* Both engines may notice an expiring token at the same time. Keep the
+         credential with the later expiry rather than rolling OpenCode back. */
+      if (Number(current.expires) >= Number(credential.expires)) return;
+      await oc.request('/auth/openai', credential, undefined, 30000, 'PUT');
+    };
+    const task = sharedOAuthSyncQueue.then(update, update);
+    sharedOAuthSyncQueue = task.catch(() => {});
+    return task;
+  },
+});
 const legacy = openLegacy(process.env.WORKBENCH_LEGACY_DB || path.join(HOME, '.local/share/opencode/opencode.db'));
 
 const MIN_RUNS = 1;
@@ -274,13 +294,14 @@ function runtimeHooks(run, command, conversation) {
 
 const PROVIDER_LABELS = {
   'opencode-go': 'OpenCode Go', openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google',
+  'openai-codex': 'OpenAI',
   'google-vertex': 'Google Vertex', openrouter: 'OpenRouter', groq: 'Groq', mistral: 'Mistral',
   xai: 'xAI', deepseek: 'DeepSeek', 'github-copilot': 'GitHub Copilot', azure: 'Azure OpenAI',
   cerebras: 'Cerebras', together: 'Together AI', fireworks: 'Fireworks', deepinfra: 'DeepInfra',
 };
 const providerLabel = (id) => PROVIDER_LABELS[id] || String(id || '').split(/[-_]/).map((word) => word ? word[0].toUpperCase() + word.slice(1) : word).join(' ');
 const consoleUrl = (provider) => provider === 'opencode-go' ? 'https://opencode.ai/auth'
-  : provider === 'openai' ? 'https://platform.openai.com/usage'
+  : provider === 'openai' || provider === 'openai-codex' ? 'https://platform.openai.com/usage'
   : provider === 'anthropic' ? 'https://console.anthropic.com/settings/usage' : '';
 
 async function readAuth() {
@@ -292,9 +313,12 @@ async function readPiAuth() {
 
 function describeOffering(model, engine, auth, piAuth, fetchedAt, stale = false) {
   const entry = auth[model.provider];
+  const sharedOpenAIOAuth = engine === 'pi' && model.provider === 'openai-codex'
+    && auth.openai?.type === 'oauth' && !piAuth['openai-codex'];
   const authKind = engine === 'opencode'
     ? (entry?.type === 'oauth' ? 'subscription' : entry?.type === 'api' ? 'api_key' : 'unknown')
-    : (piAuth[model.provider] ? 'api_key' : entry?.type === 'api' ? 'api_key' : 'unknown');
+    : (sharedOpenAIOAuth ? 'subscription' : piAuth[model.provider]?.type === 'oauth' ? 'subscription'
+      : piAuth[model.provider] ? 'api_key' : entry?.type === 'api' ? 'api_key' : 'unknown');
   return {
     ...model,
     engine,
@@ -302,6 +326,7 @@ function describeOffering(model, engine, auth, piAuth, fetchedAt, stale = false)
     connectionLabel: providerLabel(model.provider),
     authKind,
     planLabel: engine === 'opencode' && model.provider === 'opencode-go' ? 'Go plan'
+      : sharedOpenAIOAuth || (engine === 'pi' && piAuth[model.provider]?.type === 'oauth') ? 'Subscription'
       : authKind === 'subscription' ? 'Subscription' : null,
     available: true,
     stale,
@@ -334,7 +359,15 @@ async function refreshCatalog() {
   if (catalogRefresh) return catalogRefresh;
   catalogRefresh = (async () => {
     const [auth, piAuth] = await Promise.all([readAuth(), readPiAuth()]);
-    const results = await Promise.allSettled([oc.models(), pi.models()]);
+    const openCodeModels = oc.models();
+    const piModels = openCodeModels.then((models) => {
+      pi.setOpenAICatalog(models.filter((model) => model.provider === 'openai'));
+      return pi.models();
+    }, () => {
+      pi.setOpenAICatalog([]);
+      return pi.models();
+    });
+    const results = await Promise.allSettled([openCodeModels, piModels]);
     const next = [];
     const errors = [];
     results.forEach((result, index) => {
@@ -377,10 +410,13 @@ async function connections() {
   for (const provider of piProviders) {
     const models = catalog.filter((model) => model.engine === 'pi' && model.provider === provider);
     const shared = auth[provider]?.type === 'api';
+    const sharedOpenAIOAuth = provider === 'openai-codex' && auth.openai?.type === 'oauth' && !piAuth[provider];
+    const ownOAuth = piAuth[provider]?.type === 'oauth';
     list.push({
       id: `pi:${provider}`, engine: 'pi', provider, label: providerLabel(provider),
-      auth: piAuth[provider] ? 'Pi API key' : shared ? 'Shared OpenCode API key' : 'API key',
-      authKind: 'api_key',
+      auth: sharedOpenAIOAuth ? 'Shared OpenAI OAuth / subscription' : ownOAuth ? 'Pi OAuth / subscription'
+        : piAuth[provider] ? 'Pi API key' : shared ? 'Shared OpenCode API key' : 'API key',
+      authKind: sharedOpenAIOAuth || ownOAuth ? 'subscription' : 'api_key',
       health: models.length ? 'ok' : 'unknown',
       healthMessage: null,
       modelCount: models.length, consoleUrl: consoleUrl(provider),
@@ -959,19 +995,20 @@ function authenticate(req) {
 }
 
 async function upload(req, res, url) {
-  const mime = String(req.headers['content-type'] || '').split(';')[0];
-  const extensions = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'text/plain': 'txt', 'text/markdown': 'md', 'application/json': 'json' };
-  if (!extensions[mime]) throw fail('Upload PNG, JPEG, WebP, GIF, text, Markdown or JSON.', 415);
+  const mime = String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim() || 'application/octet-stream';
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 5 * 1024 * 1024) throw fail('Each attachment must be at most 5 MB.', 413);
+    if (size > 50 * 1024 * 1024) throw fail('Each attachment must be at most 50 MB.', 413);
     chunks.push(chunk);
   }
   if (!size) throw fail('Empty attachment.');
   const bytes = Buffer.concat(chunks);
   const hex = bytes.subarray(0, 12).toString('hex');
+  // Only images are sniffed: a mislabeled image would otherwise reach the model
+  // as a broken vision input. Everything else is stored opaquely and handed to
+  // the agent as a file on disk.
   if ((mime === 'image/png' && !hex.startsWith('89504e470d0a1a0a'))
     || (mime === 'image/jpeg' && !hex.startsWith('ffd8ff'))
     || (mime === 'image/gif' && !bytes.subarray(0, 6).toString().match(/^GIF8[79]a$/))
@@ -980,11 +1017,26 @@ async function upload(req, res, url) {
   }
   const hash = createHash('sha256').update(bytes).digest('hex');
   const id = uid('att_');
-  const filename = `${hash}.${extensions[mime]}`;
+  const requested = String(url.searchParams.get('name') || '').slice(0, 200);
+  const ext = safeExtension(requested, mime);
+  const filename = `${hash}.${ext}`;
   await writeFile(path.join(BLOBS, filename), bytes, { mode: 0o600 });
-  const name = String(url.searchParams.get('name') || `attachment.${extensions[mime]}`).slice(0, 200);
+  const name = requested || `attachment.${ext}`;
   store.db.prepare('INSERT INTO attachments VALUES (?,?,?,?,?,?,?)').run(id, name, mime, size, hash, filename, Date.now());
   json(res, 201, { attachment: { id, name, mime, bytes: size, url: `/api/v2/attachments/${id}` } });
+}
+
+const MIME_EXTENSIONS = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+  'text/plain': 'txt', 'text/markdown': 'md', 'text/csv': 'csv', 'application/json': 'json',
+  'application/pdf': 'pdf', 'application/zip': 'zip', 'application/gzip': 'gz', 'application/x-tar': 'tar',
+};
+// Prefer the uploaded name's own extension; fall back to the mime table, then
+// "bin". Sanitised so it can never break out of the blob filename.
+function safeExtension(name, mime) {
+  const fromName = (String(name).match(/\.([A-Za-z0-9]{1,12})$/) || [])[1];
+  if (fromName) return fromName.toLowerCase();
+  return MIME_EXTENSIONS[mime] || 'bin';
 }
 
 async function routes(req, res) {
@@ -1008,7 +1060,7 @@ async function routes(req, res) {
       seq: store.sequence(),
       defaults: { opencode: defaultModel('opencode'), pi: defaultModel('pi') },
       engines: ['opencode', 'pi'],
-      defaultEngine: 'pi',
+      defaultEngine: store.getSetting('default.engine') || 'pi',
       capabilities: CAPABILITIES,
       maxRuns: maxRuns(),
       openTabs: store.getSetting('openTabs', null),
@@ -1085,6 +1137,7 @@ async function routes(req, res) {
       active: runCapacityCount(),
       queued: store.queued(),
       defaults: { opencode: defaultModel('opencode'), pi: defaultModel('pi') },
+      defaultEngine: store.getSetting('default.engine') || 'pi',
       favorites: store.getSetting('favorites', []),
       openTabs: store.getSetting('openTabs', null),
       smtp: publicSmtpConfig(store),
@@ -1097,6 +1150,7 @@ async function routes(req, res) {
       validateModel(b.defaultModel, engine);
       store.setSetting(`default.${engine}`, b.defaultModel);
     }
+    if (b.defaultEngine === 'opencode' || b.defaultEngine === 'pi') store.setSetting('default.engine', b.defaultEngine);
     if (Array.isArray(b.favorites)) store.setSetting('favorites', b.favorites.filter((value) => typeof value === 'string').slice(0, 100));
     if (b.openTabs !== undefined) {
       /* Cross-device working set. Tolerant of unknown
@@ -1119,7 +1173,7 @@ async function routes(req, res) {
       saveSmtpConfig(store, b.smtp);
       store.event('settings.changed', null, { smtp: true }, { kind: 'settings.changed' });
     }
-    if (b.defaultModel === undefined && b.favorites === undefined && b.maxRuns === undefined && b.smtp === undefined) {
+    if (b.defaultModel === undefined && b.defaultEngine === undefined && b.favorites === undefined && b.maxRuns === undefined && b.smtp === undefined) {
       return json(res, 200, { ok: true, maxRuns: maxRuns(), smtp: publicSmtpConfig(store) });
     }
     store.event('models.changed', null);
@@ -1690,6 +1744,7 @@ maintenance('legacy_import', importLegacy);
 maintenance('legacy_sync', () => syncLegacySessions(true));
 store.recover();
 await seedCatalog();
+pi.setOpenAICatalog(catalog.filter((model) => model.provider === 'openai'));
 await importClips();
 maintenance('legacy_recovery', reconcileRecordedRuns);
 

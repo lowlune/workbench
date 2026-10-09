@@ -67,7 +67,7 @@ export function ConversationNav({ messages, prompts: providedPrompts, viewportRe
       aria-label="Jump to a prompt"
       className="pointer-events-none absolute top-1/2 left-0 z-10 hidden -translate-y-1/2 md:flex"
     >
-      <div className="pointer-events-auto flex flex-col gap-1 pl-1.5">
+      <div className="pointer-events-auto flex flex-col gap-0.5 pl-1">
         {prompts.map((prompt, index) => (
           <button
             key={prompt.id}
@@ -75,7 +75,7 @@ export function ConversationNav({ messages, prompts: providedPrompts, viewportRe
             onClick={() => jump(prompt.id)}
             aria-label={`Jump to prompt ${index + 1}`}
             aria-current={index === active ? 'true' : undefined}
-            className="group/nav relative flex h-3.5 w-4 cursor-pointer items-center"
+            className="group/nav relative flex h-2 w-4 cursor-pointer items-center"
           >
             <span
               className={cn(

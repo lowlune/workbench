@@ -3,17 +3,20 @@ export interface Attachment {
   dataUrl: string;
   id?: string;
   mime?: string;
+  bytes?: number;
 }
 
-const SUPPORTED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'text/plain', 'text/markdown', 'application/json']);
+const MAX_BYTES = 50 * 1024 * 1024;
 
-export async function fileToDataUrl(file: File): Promise<Attachment> {
-  const mime = file.type || (/\.(md|txt|log|csv|ts|js|py|css|html)$/i.test(file.name) ? 'text/plain' : '');
-  if (!SUPPORTED.has(mime)) throw new Error('Choose an image, text, Markdown or JSON file.');
-  if (file.size > 5 * 1024 * 1024) throw new Error('Files must be 5 MB or smaller.');
+/* Upload any file to the control plane. Images come back usable as a preview
+   (`dataUrl` is the attachment URL); everything else is stored opaquely and the
+   agent receives it as a file on disk to read/process with its tools. */
+export async function uploadAttachment(file: File): Promise<Attachment> {
+  if (file.size > MAX_BYTES) throw new Error('Files must be 50 MB or smaller.');
+  const mime = file.type || 'application/octet-stream';
   const response = await fetch(`/api/v2/attachments?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'content-type': mime }, body: file });
-  const result = await response.json();
+  const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || 'Upload failed.');
   const a = result.attachment;
-  return { id: a.id, name: a.name, mime: a.mime, dataUrl: a.url };
+  return { id: a.id, name: a.name, mime: a.mime, bytes: a.bytes, dataUrl: a.url };
 }

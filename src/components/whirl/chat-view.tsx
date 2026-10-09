@@ -1,11 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconAlertTriangleFilled, IconArrowLeft, IconArrowUpRight, IconBook, IconLoader2, IconX } from '@tabler/icons-react';
+import { IconAlertTriangleFilled, IconArrowLeft, IconArrowUpRight, IconBook, IconClock, IconLoader2, IconX } from '@tabler/icons-react';
 import { Composer } from '@/components/whirl/composer';
 import { ConversationNav } from '@/components/whirl/conversation-nav';
 import type { FileRef } from '@/components/whirl/file-viewer';
 import { InteractionCard } from '@/components/whirl/interaction-card';
-import { ModelMenu } from '@/components/whirl/model-menu';
+import { ModelSelect } from '@/components/whirl/model-select';
 import { WorkspaceMenu } from '@/components/whirl/workspace-menu';
 import { RunSummary } from '@/components/whirl/run-summary';
 import { TaskListPanel } from '@/components/whirl/task-list-panel';
@@ -16,7 +16,7 @@ import type { Attachment } from '@/lib/attachments';
 import { messageContext } from '@/lib/format';
 import type { Agent, Project, QueuedMessage, Session } from '@/lib/types';
 import { cn, humanBytes } from '@/lib/utils';
-import { conversationPrompts, steerConversation, ACTIVE_RUN_STATES, mutate } from '@/lib/workbench';
+import { conversationPrompts, ACTIVE_RUN_STATES, mutate } from '@/lib/workbench';
 
 const FileViewer = lazy(() => import('@/components/whirl/file-viewer').then(module => ({ default: module.FileViewer })));
 
@@ -184,7 +184,6 @@ export function ChatView({
     enabled: Boolean(sessionId),
     staleTime: 30_000,
   });
-  const currentModel = selectedModel || session?.modelPref || undefined;
 
   const jumpToMessage = useCallback((messageId: string) => {
     const viewport = viewportRef.current;
@@ -214,20 +213,21 @@ export function ChatView({
     else if (agent) onStop(agent);
   }, [sessionId, agent, onStopSession, onStop]);
 
+  /* Hard steer: interrupt the running agent so the queued message becomes the
+     next turn. `stop` parks the queue, `resume` releases it again — the queued
+     command then starts as soon as the interrupted run is reaped. */
   const steer = useCallback(async () => {
     const id = sessionId || session?.id;
-    const text = draft.trim();
-    if (!id || !text) return;
+    if (!id || !queued.length) return;
     try {
-      const result = await steerConversation(id, { text, model: currentModel });
-      onDraftChange('');
-      onAttachmentsChange([]);
+      await mutate(`/conversations/${encodeURIComponent(id)}/stop`, {});
+      await mutate(`/conversations/${encodeURIComponent(id)}/resume`, {});
       await queryClient.invalidateQueries({ queryKey: ['session', id] });
-      onToast(result.steered ? 'Sent into the running agent.' : 'Queued — no live worker to steer.');
+      onToast('Stopped the current run — sending your queued message now.');
     } catch (error) {
       onToast(error instanceof Error ? error.message : 'Could not steer the run.', true);
     }
-  }, [sessionId, session?.id, draft, currentModel, onDraftChange, onAttachmentsChange, queryClient, onToast]);
+  }, [sessionId, session?.id, queued.length, queryClient, onToast]);
 
   /* ESC interrupts the active Run only when no other surface owns the key and
      the chat itself holds focus (§15). The callback rides a ref so the
@@ -408,29 +408,30 @@ export function ChatView({
                 {queued.length > 0 && (
                   <div
                     role="status"
-                    className="mb-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
+                    className="mb-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2.5 text-[12px] backdrop-blur-xl"
                   >
-                    <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+                    <div className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
+                      <IconClock size={12} className="shrink-0" />
                       <span className="font-medium text-foreground/80">Queued</span>
                       <span className="tabular-nums">{queued.length}</span>
-                      <span className="ml-auto">sends after this reply</span>
+                      <span className="min-w-0 truncate">· sends when the run finishes</span>
                       {runActive && (
                         <button
                           type="button"
                           onClick={() => void steer()}
-                          title="Send into the running agent now — it adapts at its next step"
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-well px-2 py-0.5 font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-colors duration-150 hover:bg-accent"
+                          title="Stop the running agent and send this message now"
+                          className="ml-auto inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full bg-well px-2.5 py-1 font-medium text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-colors duration-150 hover:bg-accent"
                         >
                           <IconArrowUpRight size={11} stroke={2.2} />
-                          Steer
+                          Send now
                         </button>
                       )}
                     </div>
-                    <ul className="mt-1 flex flex-col">
+                    <ul className="mt-1.5 flex flex-col gap-0.5">
                       {queued.map((item) => (
-                        <li key={item.id} className="group/q flex items-center gap-2 rounded-md px-1 py-1 transition-colors duration-100 hover:bg-accent">
-                          <span aria-hidden="true" className="size-1 shrink-0 rounded-full bg-muted-foreground/50" />
-                          <span className="min-w-0 flex-1 truncate text-foreground/90">
+                        <li key={item.id} className="group/q flex items-start gap-2 rounded-md px-1.5 py-1.5 transition-colors duration-100 hover:bg-accent">
+                          <span aria-hidden="true" className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/50" />
+                          <span className="line-clamp-3 min-w-0 flex-1 break-words whitespace-pre-wrap text-[13px]/5 text-foreground/90">
                             {item.text || `${item.attachments.length} attachment${item.attachments.length === 1 ? '' : 's'}`}
                           </span>
                           <button
@@ -475,13 +476,15 @@ export function ChatView({
                           onSelect={onSelectWorkspace}
                         />
                       )}
-                      <ModelMenu
-                        model={selectedModel || session?.modelPref || context.model}
+                      <ModelSelect
+                        engine={session?.engine || 'pi'}
+                        value={selectedModel || session?.modelPref || context.model}
                         context={context}
                         directory={session?.directory}
                         tags={session?.tags}
                         liveAgent={hasLivePane}
-                        onSelect={onSelectModel}
+                        onChange={onSelectModel}
+                        onToast={onToast}
                         compact
                       />
                       {context.limit > 0 && (

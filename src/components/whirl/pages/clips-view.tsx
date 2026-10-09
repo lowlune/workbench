@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconClipboardText, IconCopy, IconLoader2, IconPaperclip, IconTrash } from '@tabler/icons-react';
 import { api, getClips, postJson } from '@/lib/api';
-import { fileToDataUrl } from '@/lib/attachments';
+import { uploadAttachment } from '@/lib/attachments';
 import type { Clip } from '@/lib/types';
 import { timeAgo } from '@/lib/utils';
 
@@ -23,7 +23,7 @@ export function ClipsView({ onToast }: { onToast: (message: string, isError?: bo
 
   const addImage = useMutation({
     mutationFn: async (file: File) => {
-      const attachment = await fileToDataUrl(file);
+      const attachment = await uploadAttachment(file);
       return postJson<{ clip: Clip }>('/api/v2/clips', { attachmentId: attachment.id, projectId: null });
     },
     onSuccess: () => { invalidate(); onToast('Image saved to the clip tray.'); },

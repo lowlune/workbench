@@ -8,6 +8,9 @@ import { decode, fail } from './store.mjs';
 import { sandboxSpawn, signalGroup, terminateGroup } from './security.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/* Small text-ish attachments are inlined into the prompt; anything else is left
+   on disk and the agent is told the path so it can read/process it itself. */
+const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|typescript|x-yaml|yaml|x-sh|x-ndjson|toml|sql|graphql|x-httpd-php))/;
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
   server.once('error', reject);
@@ -334,11 +337,19 @@ export class OpenCodeRuntime {
     try {
       const split = command.model.indexOf('/');
       const parts = [{ type: 'text', text: decode(command.input, {}).text || '' }];
+      const saved = [];
       for (const attachment of attachments) {
-        const data = await readFile(attachment.filePath);
-        if (attachment.mime.startsWith('image/')) parts.push({ type: 'file', mime: attachment.mime, filename: attachment.name, url: `data:${attachment.mime};base64,${data.toString('base64')}` });
-        else parts.push({ type: 'text', text: `Attached file ${attachment.name}:\n${data.toString('utf8')}` });
+        if (attachment.mime.startsWith('image/')) {
+          const data = await readFile(attachment.filePath);
+          parts.push({ type: 'file', mime: attachment.mime, filename: attachment.name, url: `data:${attachment.mime};base64,${data.toString('base64')}` });
+        } else if (TEXT_MIME.test(String(attachment.mime || '')) && attachment.bytes <= 100_000) {
+          const data = await readFile(attachment.filePath);
+          parts.push({ type: 'text', text: `Attached file ${attachment.name}:\n${data.toString('utf8')}` });
+        } else {
+          saved.push(`- ${attachment.name} (${attachment.mime}, ${attachment.bytes} bytes) is saved at ${attachment.filePath}`);
+        }
       }
+      if (saved.length) parts.push({ type: 'text', text: `Attached files are on disk — read/process them with your tools:\n${saved.join('\n')}` });
       hooks.running();
       try {
         await this.request(`/session/${nativeId}/prompt_async`, {
@@ -421,9 +432,28 @@ export class OpenCodeRuntime {
 }
 
 export class PiRuntime {
-  constructor({ dataDir }) {
+  constructor({ dataDir, syncSharedOAuthCredential = async () => { throw new Error('Shared OAuth synchronization is unavailable.'); } }) {
     this.dataDir = dataDir;
     this.runs = new Map();
+    this.openAICatalog = [];
+    this.syncSharedOAuthCredential = syncSharedOAuthCredential;
+    this.oauthSyncQueue = Promise.resolve();
+  }
+
+  setOpenAICatalog(models) {
+    this.openAICatalog = Array.isArray(models) ? models.filter((model) => model.provider === 'openai') : [];
+  }
+
+  handleSharedOAuthMessage(child, message) {
+    if (message.type !== 'sync-shared-oauth') return false;
+    const sync = () => this.syncSharedOAuthCredential({ provider: message.provider, credential: message.credential });
+    const task = this.oauthSyncQueue.then(sync, sync);
+    this.oauthSyncQueue = task.catch(() => {});
+    void task.then(
+      () => { if (child.connected) child.send({ type: 'sync-shared-oauth-result', id: message.id }); },
+      (error) => { if (child.connected) child.send({ type: 'sync-shared-oauth-result', id: message.id, error: error.message }); },
+    );
+    return true;
   }
 
   spawn(sandbox = null) {
@@ -436,7 +466,8 @@ export class PiRuntime {
     }, { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   }
 
-  async models() {
+  async models(openAICatalog) {
+    if (openAICatalog !== undefined) this.setOpenAICatalog(openAICatalog);
     const child = this.spawn();
     child.stderr.resume();
     return new Promise((resolve, reject) => {
@@ -453,9 +484,10 @@ export class PiRuntime {
       child.once('error', (error) => finish(error));
       child.once('exit', (code, signal) => finish(new Error(`Pi model discovery exited (${signal || code}).`)));
       child.on('message', (event) => {
+        if (this.handleSharedOAuthMessage(child, event)) return;
         if (event.type === 'models') finish(null, event.models);
       });
-      child.send({ type: 'models', dataDir: this.dataDir });
+      child.send({ type: 'models', dataDir: this.dataDir, openAICatalog: this.openAICatalog });
     });
   }
 
@@ -486,6 +518,7 @@ export class PiRuntime {
       });
       child.on('message', (event) => {
         try {
+        if (this.handleSharedOAuthMessage(child, event)) return;
         if (event.type === 'binding') hooks.binding(event.nativeId);
         else if (event.type === 'message') hooks.message(event.message);
         else if (event.type === 'activity') hooks.activity?.(event.activity);
@@ -513,6 +546,7 @@ export class PiRuntime {
         text: decode(command.input, {}).text,
         attachments,
         dataDir: this.dataDir,
+        openAICatalog: this.openAICatalog,
       });
     });
   }

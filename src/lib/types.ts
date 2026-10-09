@@ -172,6 +172,7 @@ export interface Bootstrap {
   seq: number;
   defaults: Partial<Record<Engine, string | null>>;
   engines: Engine[];
+  defaultEngine?: Engine;
   connections?: Connection[];
   nextCursor?: string | null;
   maxRuns?: number;

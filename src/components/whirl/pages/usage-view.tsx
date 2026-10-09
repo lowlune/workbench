@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconExternalLink, IconRefresh, IconTrash } from '@tabler/icons-react';
-import { ModelPicker } from '@/components/whirl/model-picker';
+import { ModelSelect } from '@/components/whirl/model-select';
 import { connections, deleteUsageLimit, mutate, offerings, saveUsageLimit, usageLimits, usagePacing, usageReport } from '@/lib/workbench';
 import { formatTokens } from '@/lib/format';
 import type { Connection, Engine, PacingMetric, Project, UsageBreakdown, UsageLimit, UsagePacing } from '@/lib/types';
@@ -154,7 +154,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
               <IconRefresh size={12} /> Refresh catalog{models.data?.fetchedAt ? ` (${new Date(models.data.fetchedAt).toLocaleTimeString()})` : ''}
             </button>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">Pi reuses OpenCode API keys without copying OAuth refresh tokens. OpenAI OAuth stays managed by OpenCode.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Pi shares OpenCode API keys and uses the OpenAI OAuth connection through its Codex adapter. Token refreshes sync back to OpenCode.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             <select aria-label="Connection engine" className="rounded-md bg-background p-2 text-sm" value={engine} onChange={(event) => setEngine(event.target.value)}>
               <option value="opencode">OpenCode</option><option value="pi">Pi</option>
@@ -186,7 +186,7 @@ export default function UsageView({ projects, onToast }: { projects: Project[]; 
           {(['opencode', 'pi'] as const).map((item) => (
             <div key={item} className="flex items-center gap-3 rounded-xl bg-well p-3 text-xs">
               <span className="w-20 text-muted-foreground">{item === 'pi' ? 'Pi' : 'OpenCode'}</span>
-              <ModelPicker engine={item} value={models.data?.defaults?.[item]} onChange={(model) => void setDefault(model, item)} onToast={onToast} />
+              <ModelSelect engine={item} value={models.data?.defaults?.[item]} onChange={(model) => void setDefault(model, item)} onToast={onToast} />
             </div>
           ))}
         </div>

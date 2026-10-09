@@ -1,15 +1,26 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   createAgentSession, ModelRuntime, SessionManager, SettingsManager, DefaultResourceLoader,
 } from '@earendil-works/pi-coding-agent';
+import {
+  OPENAI_CODEX_PROVIDER,
+  openAICodexModelDefinitions,
+  sharedOpenAICodexCredential,
+} from './pi/openai-codex.mjs';
 import { createWorkbenchExtension, BUILD_TOOLS, READ_ONLY_TOOLS } from './pi/tools.mjs';
 import { workbenchAgentsFile, createAgentsFilesOverride } from './pi/context.mjs';
 import { classifyTool, summarizeTool, usageEvent, toolTitle, commandArg, writeChange, capDiff, textOfMessage, diffText, currentAction, estimateEta, parseDeletedPaths } from './pi/events.mjs';
 
 const send = (value) => { if (process.connected) process.send(value); };
 const emit = (event) => send({ type: 'event', event });
+
+/* Small text-ish attachments are inlined into the prompt; anything else (PDF,
+   ZIP, binaries, …) is left on disk and the agent is told the path so it can
+   read/process it with its own tools. */
+const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|typescript|x-yaml|yaml|x-sh|x-ndjson|toml|sql|graphql|x-httpd-php))/;
+const isTextLike = (mime) => TEXT_MIME.test(String(mime || ''));
 
 function sendAndExit(value, code) {
   const leave = () => { try { process.disconnect(); } catch {} process.exit(code); };
@@ -22,6 +33,8 @@ let active = null;
 let counter = 0;
 let settleResolve = null;
 let lastError = null;
+let oauthSyncSequence = 0;
+const oauthSyncWaiters = new Map();
 
 function compactInput(args) {
   if (!args || typeof args !== 'object') return undefined;
@@ -69,14 +82,78 @@ async function abortRun() {
   try { await session?.abort(); } catch {}
 }
 
+async function createWorkbenchModelRuntime(agentDir, openAICatalog = []) {
+  await mkdir(agentDir, { recursive: true, mode: 0o700 });
+  const persistentAuthPath = path.join(agentDir, 'auth.json');
+  const piAuth = JSON.parse(await readFile(persistentAuthPath, 'utf8').catch(() => '{}'));
+  const openCodeAuth = JSON.parse(await readFile(path.join(process.env.HOME, '.local/share/opencode/auth.json'), 'utf8').catch(() => '{}'));
+  const sharedCredential = sharedOpenAICodexCredential(openCodeAuth, piAuth);
+  const runtimeAuth = { ...piAuth };
+  if (sharedCredential) runtimeAuth[OPENAI_CODEX_PROVIDER] = sharedCredential;
+
+  /* OAuth credentials are copied into a per-run file so Pi's refresh can be
+     synchronized back to OpenCode without persisting a second stale copy. */
+  const authPath = path.join(agentDir, `.workbench-auth-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+  await writeFile(authPath, JSON.stringify(runtimeAuth), { mode: 0o600 });
+  try {
+    const runtime = await ModelRuntime.create({ authPath, modelsPath: null, modelsStorePath: path.join(agentDir, 'models-cache.json'), allowModelNetwork: false });
+    for (const [provider, value] of Object.entries(openCodeAuth)) if (value.type === 'api' && value.key && runtime.getProvider(provider) && !runtime.hasConfiguredAuth(provider)) await runtime.setRuntimeApiKey(provider, value.key);
+    if (sharedCredential) {
+      const definitions = openAICodexModelDefinitions(openAICatalog, runtime.getModels(OPENAI_CODEX_PROVIDER));
+      if (definitions.length) runtime.registerProvider(OPENAI_CODEX_PROVIDER, { models: definitions });
+    }
+    return { runtime, authPath, sharedCredential };
+  } catch (error) {
+    await unlink(authPath).catch(() => {});
+    throw error;
+  }
+}
+
+async function releaseWorkbenchModelRuntime(context) {
+  try {
+    if (!context.sharedCredential) return;
+    const runtimeAuth = JSON.parse(await readFile(context.authPath, 'utf8').catch(() => '{}'));
+    const current = runtimeAuth[OPENAI_CODEX_PROVIDER];
+    if (current?.type !== 'oauth') return;
+    if (current.access === context.sharedCredential.access
+      && current.refresh === context.sharedCredential.refresh
+      && current.expires === context.sharedCredential.expires) return;
+    await requestSharedOAuthSync({ provider: 'openai', credential: current });
+  } finally {
+    await unlink(context.authPath).catch(() => {});
+  }
+}
+
+function requestSharedOAuthSync({ provider, credential }) {
+  if (!process.connected) return Promise.reject(new Error('Workbench control plane disconnected before OAuth credentials could be synchronized.'));
+  const id = `oauth_${process.pid}_${++oauthSyncSequence}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      oauthSyncWaiters.delete(id);
+      reject(new Error('Timed out synchronizing shared OpenAI credentials.'));
+    }, 30000);
+    timer.unref?.();
+    oauthSyncWaiters.set(id, { resolve, reject, timer });
+    process.send({ type: 'sync-shared-oauth', id, provider, credential }, (error) => {
+      if (!error) return;
+      clearTimeout(timer);
+      oauthSyncWaiters.delete(id);
+      reject(error);
+    });
+  });
+}
+
 async function modelsOnce(message) {
   const agentDir = path.join(message.dataDir, 'pi');
-  await mkdir(agentDir, { recursive: true, mode: 0o700 });
-  const runtime = await ModelRuntime.create({ authPath: path.join(agentDir, 'auth.json'), modelsPath: null, modelsStorePath: path.join(agentDir, 'models-cache.json'), allowModelNetwork: false });
-  const auth = JSON.parse(await readFile(path.join(process.env.HOME, '.local/share/opencode/auth.json'), 'utf8').catch(() => '{}'));
-  for (const [provider, value] of Object.entries(auth)) if (value.type === 'api' && value.key && runtime.getProvider(provider) && !runtime.hasConfiguredAuth(provider)) await runtime.setRuntimeApiKey(provider, value.key);
-  const models = await runtime.getAvailable();
-  sendAndExit({ type: 'models', models: models.map((m) => ({ id: `${m.provider}/${m.id}`, provider: m.provider, name: m.name, contextLimit: m.contextWindow, outputLimit: m.maxTokens, images: m.input?.includes('image'), reasoning: m.reasoning, engine: 'pi', cost: m.cost })) }, 0);
+  const context = await createWorkbenchModelRuntime(agentDir, message.openAICatalog || []);
+  let result;
+  try {
+    const models = await context.runtime.getAvailable();
+    result = { type: 'models', models: models.map((m) => ({ id: `${m.provider}/${m.id}`, provider: m.provider, name: m.name, contextLimit: m.contextWindow, outputLimit: m.maxTokens, images: m.input?.includes('image'), reasoning: m.reasoning, engine: 'pi', cost: m.cost })) };
+  } finally {
+    await releaseWorkbenchModelRuntime(context);
+  }
+  sendAndExit(result, 0);
 }
 
 async function runOnce(message) {
@@ -87,13 +164,13 @@ async function runOnce(message) {
   lastError = null;
   counter = 0;
 
-  const runtime = await ModelRuntime.create({ authPath: path.join(agentDir, 'auth.json'), modelsPath: null, modelsStorePath: path.join(agentDir, 'models-cache.json'), allowModelNetwork: false });
-  const auth = JSON.parse(await readFile(path.join(process.env.HOME, '.local/share/opencode/auth.json'), 'utf8').catch(() => '{}'));
-  for (const [provider, value] of Object.entries(auth)) if (value.type === 'api' && value.key && runtime.getProvider(provider) && !runtime.hasConfiguredAuth(provider)) await runtime.setRuntimeApiKey(provider, value.key);
+  const modelRuntimeContext = await createWorkbenchModelRuntime(agentDir, message.openAICatalog || []);
+  active.modelRuntimeContext = modelRuntimeContext;
+  const runtime = modelRuntimeContext.runtime;
   const models = await runtime.getAvailable();
   const split = message.model.indexOf('/');
   const model = runtime.getModel(message.model.slice(0, split), message.model.slice(split + 1));
-  if (!model || !models.some((m) => m.id === model.id && m.provider === model.provider)) throw new Error('This model is not authenticated in Pi. Connect its API key in Usage & models.');
+  if (!model || !models.some((m) => m.id === model.id && m.provider === model.provider)) throw new Error('This model is not authenticated in Pi. Connect its provider in Usage & models.');
 
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 }, cacheWarming: { mode: 'off' } });
   const port = {
@@ -232,12 +309,20 @@ async function runOnce(message) {
   });
 
   const images = [];
+  const saved = [];
   let text = message.text;
   for (const attachment of message.attachments || []) {
-    const bytes = await readFile(attachment.filePath);
-    if (attachment.mime.startsWith('image/')) images.push({ type: 'image', data: bytes.toString('base64'), mimeType: attachment.mime });
-    else text += `\n\nAttached file (${attachment.name}):\n${bytes.toString('utf8').slice(0, 100000)}`;
+    if (attachment.mime.startsWith('image/')) {
+      const bytes = await readFile(attachment.filePath);
+      images.push({ type: 'image', data: bytes.toString('base64'), mimeType: attachment.mime });
+    } else if (isTextLike(attachment.mime) && attachment.bytes <= 100_000) {
+      const bytes = await readFile(attachment.filePath);
+      text += `\n\nAttached file (${attachment.name}):\n${bytes.toString('utf8').slice(0, 100_000)}`;
+    } else {
+      saved.push(`- ${attachment.name} (${attachment.mime}, ${attachment.bytes} bytes) is saved at ${attachment.filePath}`);
+    }
   }
+  if (saved.length) text += `\n\nAttached files are on disk — read/process them with your tools:\n${saved.join('\n')}`;
 
   emit({ kind: 'run.state', status: 'running', model: `${model.provider}/${model.id}`, provider: model.provider });
   try {
@@ -248,6 +333,8 @@ async function runOnce(message) {
   } finally {
     for (const timer of timers.values()) clearTimeout(timer);
     for (const current of messages.values()) publish(current, true);
+    try { await releaseWorkbenchModelRuntime(modelRuntimeContext); }
+    catch (error) { lastError ||= `Shared OpenAI credential synchronization failed: ${error.message}`; }
     try {
       const stats = session.getSessionStats();
       emit({ kind: 'usage.updated', total: true, runId: message.commandId, input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, totalTokens: stats.tokens.total, cost: stats.cost });
@@ -287,6 +374,15 @@ function imagePartsFrom(result, messageId, toolCallId) {
 
 process.on('message', async (message) => {
   try {
+    if (message.type === 'sync-shared-oauth-result') {
+      const waiter = oauthSyncWaiters.get(message.id);
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      oauthSyncWaiters.delete(message.id);
+      if (message.error) waiter.reject(new Error(message.error));
+      else waiter.resolve();
+      return;
+    }
     if (message.type === 'stop') { await abortRun(); return; }
     if (message.type === 'steer') {
       const text = String(message.text || '');
@@ -309,6 +405,12 @@ process.on('message', async (message) => {
     if (message.type !== 'run') return;
     await runOnce(message);
   } catch (error) {
+    if (active?.modelRuntimeContext) {
+      const context = active.modelRuntimeContext;
+      active.modelRuntimeContext = null;
+      try { await releaseWorkbenchModelRuntime(context); }
+      catch (syncError) { error.message = `${error.message}; shared OpenAI credential synchronization failed: ${syncError.message}`; }
+    }
     for (const pending of active?.pending.values() || []) pending.reject(error);
     const hadRun = !!active;
     if (active) active.pending.clear();

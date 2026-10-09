@@ -24,6 +24,46 @@ test('real Pi discovery uses sandboxed IPC without provider credentials', { time
   assert.ok(Array.isArray(models)); assert.equal(models.length, 0);
 });
 
+test('Pi exposes the OpenCode OpenAI OAuth catalog through its Codex adapter', { timeout: 30000 }, async t => {
+  const f = fixture(t);
+  const authDir = `${f.home}/.local/share/opencode`;
+  mkdirSync(authDir, { recursive: true });
+  writeFileSync(`${authDir}/auth.json`, JSON.stringify({
+    openai: { type: 'oauth', access: 'access-token', refresh: 'refresh-token', expires: Date.now() + 86400000, accountId: 'test-account' },
+  }), { mode: 0o600 });
+  const runtime = new PiRuntime({ ...f, syncSharedOAuthCredential: async () => { throw new Error('Unexpected token refresh in model discovery.'); } });
+  t.after(() => runtime.close());
+  const models = await runtime.models([
+    { id: 'openai/gpt-5.4', provider: 'openai', name: 'GPT-5.4', contextLimit: 1050000, outputLimit: 128000, images: true, reasoning: true },
+    { id: 'openai/gpt-5.4-fast', provider: 'openai', name: 'GPT-5.4 Fast', contextLimit: 1050000, outputLimit: 128000, images: true, reasoning: true },
+  ]);
+  assert.ok(models.some((model) => model.id === 'openai-codex/gpt-5.4'));
+  assert.ok(models.some((model) => model.id === 'openai-codex/gpt-5.4-fast'));
+});
+
+test('Pi waits for OpenCode to save a refreshed shared OAuth credential', async () => {
+  let finishSync;
+  let synchronized;
+  const replies = [];
+  const runtime = new PiRuntime({
+    dataDir: '/unused',
+    syncSharedOAuthCredential: async value => {
+      synchronized = value;
+      await new Promise(resolve => { finishSync = resolve; });
+    },
+  });
+  const child = { connected: true, send: value => replies.push(value) };
+  const credential = { type: 'oauth', access: 'new-access', refresh: 'new-refresh', expires: 5678, accountId: 'account' };
+  assert.equal(runtime.handleSharedOAuthMessage(child, { type: 'sync-shared-oauth', id: 'sync-1', provider: 'openai', credential }), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(synchronized, { provider: 'openai', credential });
+  assert.equal(replies.length, 0);
+  finishSync();
+  await runtime.oauthSyncQueue;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(replies, [{ type: 'sync-shared-oauth-result', id: 'sync-1' }]);
+});
+
 test('OpenCode adapter owns separate sandboxed servers for concurrent same-folder runs and reaps them', { timeout: 20000 }, async t => {
   const f = fixture(t);
   const binary = `${f.home}/.opencode/bin/opencode`;
