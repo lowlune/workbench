@@ -349,7 +349,7 @@ export function ChatView({
       {connectionError && <Banner tone="muted">Reconnecting — your draft is safe.</Banner>}
       {resumeMemoryBlocked && <Banner tone="muted">Free up at least 1 GB of memory to continue this saved task. {humanBytes(memoryFree)} available now.</Banner>}
 
-      <div ref={columnRef} className="relative min-h-0 flex-1 md:py-3 md:pr-0">
+      <div ref={columnRef} className="relative min-h-0 flex-1 md:p-3">
         <ThreadView
           messages={loading ? undefined : (messages || [])}
           isWorking={Boolean(isWorking)}
