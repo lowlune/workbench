@@ -349,7 +349,7 @@ export function ChatView({
       {connectionError && <Banner tone="muted">Reconnecting — your draft is safe.</Banner>}
       {resumeMemoryBlocked && <Banner tone="muted">Free up at least 1 GB of memory to continue this saved task. {humanBytes(memoryFree)} available now.</Banner>}
 
-      <div ref={columnRef} className="relative min-h-0 flex-1 md:py-3">
+      <div ref={columnRef} className="relative min-h-0 flex-1 md:py-3 md:pr-0">
         <ThreadView
           messages={loading ? undefined : (messages || [])}
           isWorking={Boolean(isWorking)}
@@ -390,12 +390,12 @@ export function ChatView({
             ))}
             {canContinue ? (
               <>
-                {paused && (
+                {paused && queued.length > 0 && (
                   <div
                     role="status"
                     className="mb-2 flex items-center gap-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2 text-[12px] backdrop-blur-xl"
                   >
-                    <span className="min-w-0 flex-1 text-muted-foreground">Queue paused — the agent is not processing messages.</span>
+                    <span className="min-w-0 flex-1 text-muted-foreground">Queue paused — {queued.length} queued {queued.length === 1 ? 'message is' : 'messages are'} waiting.</span>
                     <button
                       type="button"
                       onClick={() => void resumeSession()}

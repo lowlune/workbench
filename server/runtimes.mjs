@@ -110,7 +110,14 @@ export class OpenCodeRuntime {
       child.on('error', (error) => { this.startError = error; });
       child.on('exit', () => {
         if (this.child === child) this.child = null;
-        for (const handle of this.runs.values()) handle.controller.abort(new Error('OpenCode runtime exited.'));
+        for (const handle of this.runs.values()) {
+          // During startup/teardown a map entry may be the runtime wrapper
+          // rather than a live prompt controller. A child exit must never crash
+          // the control plane while it is draining runs.
+          if (handle?.controller && !handle.controller.signal.aborted) {
+            handle.controller.abort(new Error('OpenCode runtime exited.'));
+          }
+        }
       });
       for (let i = 0; i < 150; i++) {
         if (this.startError) throw this.startError;

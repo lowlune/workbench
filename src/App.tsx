@@ -13,22 +13,22 @@ import { SearchPalette } from '@/components/whirl/search-palette';
 import { useSessionMenu } from '@/components/whirl/session-menu';
 import { HorizontalTabs } from '@/components/whirl/tabs/horizontal-tabs';
 import { useTabsShortcuts } from '@/components/whirl/tabs/use-tabs-shortcuts';
-import { Sidebar, type AppView, type CurrentModelChip, type UsageStatusChip } from '@/components/whirl/sidebar';
+import { Sidebar, type AppView } from '@/components/whirl/sidebar';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
-import { ApiError, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
+import { ApiError, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel, suggestSessionTitle } from '@/lib/api';
 import { useConsoleQueries } from '@/lib/use-console-queries';
 import { useSessionRepair } from '@/lib/use-session-repair';
 import { useViewportInsets } from '@/lib/viewport-insets';
 import type { Attachment } from '@/lib/attachments';
-import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, UsagePacing, UsageResponse, WorkbenchEvent } from '@/lib/types';
+import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, WorkbenchEvent } from '@/lib/types';
 import {
   ACTIVE_RUN_STATES, agentInstructionFiles, attentionOf,
-  isRunningSession, isTerminalRunState, mutate,
+  isRunningSession, isTerminalRunState, mutate, saveSharedTabs,
   runStateOf, saveSettings,
 } from '@/lib/workbench';
 import {
-  adoptServerTabs, closeAllTabs, closeOtherTabs, closeTab, forgetTabScroll, MAX_TABS, openTab,
-  reconcileTabs, reorderTabs, setTabsServerSync, togglePin, useTabs, type TabView,
+  closeAllTabs, closeOtherTabs, closeTab, forgetTabScroll, getTabsState, MAX_TABS, openTab,
+  reconcileTabs, reorderTabs, replaceTabsFromServer, setTabsServerSync, togglePin, useTabs, type TabView,
 } from '@/lib/tabs';
 import { notifyForEvent } from '@/lib/notifications';
 import { cn } from '@/lib/utils';
@@ -133,24 +133,6 @@ function patchToolPart(session: Session, toolCallId: string, patch: Partial<NonN
   return changed ? { ...session, messages } : session;
 }
 
-function computeUsageStatus(pacing?: UsagePacing, weekly?: UsageResponse): UsageStatusChip | null {
-  if (pacing) {
-    const metric = pacing.tokens?.limit != null ? pacing.tokens
-      : pacing.cost?.limit != null ? pacing.cost
-        : pacing.requests?.limit != null ? pacing.requests
-          : undefined;
-    if (metric) {
-      const percent = metric.percent ?? (metric.limit ? (Number(metric.used || 0) / metric.limit) * 100 : undefined);
-      const period = pacing.period === 'monthly' ? 'Monthly' : pacing.period === 'weekly' ? 'Weekly' : (pacing.period || 'Budget');
-      const suffix = pacing.source === 'manual' ? ' · manual' : pacing.source === 'estimated' ? ' · est.' : '';
-      const label = percent != null ? `${period} ${Math.round(percent)}%${suffix}` : `${period} budget`;
-      return { label, percent: percent ?? undefined, tone: percent == null ? 'ok' : percent >= 100 ? 'over' : percent >= 80 ? 'warn' : 'ok' };
-    }
-  }
-  if (weekly?.totals) return { label: `${weekly.totals.requests} req · 7d`, tone: 'ok' };
-  return null;
-}
-
 const emptyOverview: Overview = { agents: [], sessions: [], directories: [], system: {} };
 
 export default function App() {
@@ -179,7 +161,7 @@ export default function App() {
   const notifiedRef = useRef<Map<string, number>>(new Map());
   const archivedOpenRef = useRef(archivedOpen);
 
-  const { overviewQuery, systemQuery, bootQuery, modelsQuery, pacingQuery, weeklyUsageQuery,
+  const { overviewQuery, systemQuery, bootQuery, sharedTabsQuery,
     notificationsQuery, archivedQuery, healthQuery } = useConsoleQueries({ settingsOpen, archivedOpen });
   const overview = overviewQuery.data;
 
@@ -229,6 +211,7 @@ export default function App() {
       attention: item ? attentionOf(item) : 'none',
       running: item ? isRunningSession(item) : false,
       pinned: tabs.pinned.includes(id),
+      revision: item?.revision,
       projectId: item?.projectId,
       updated: item?.updated,
       started: item?.activeRun?.started ?? null,
@@ -247,19 +230,6 @@ export default function App() {
   const maxRuns = healthQuery.data?.maxRuns ?? bootQuery.data?.maxRuns ?? 1;
   const activeRuns = healthQuery.data?.active ?? 0;
   const queuedRuns = healthQuery.data?.queued ?? 0;
-  const currentModelId = (liveSessionId ? modelSelections[liveSessionId] : undefined)
-    || activeSession?.modelPref
-    || bootQuery.data?.defaults?.[activeSession?.engine || 'pi']
-    || bootQuery.data?.defaults?.opencode
-    || null;
-  const currentOffering = modelsQuery.data?.models.find((model) => model.id === currentModelId);
-  const currentModel: CurrentModelChip | null = currentModelId
-    ? { id: currentModelId, name: currentOffering?.name || currentModelId.split('/').pop() || currentModelId, provider: currentOffering?.provider }
-    : null;
-  const usageStatus = useMemo(
-    () => computeUsageStatus(pacingQuery.data, weeklyUsageQuery.data),
-    [pacingQuery.data, weeklyUsageQuery.data],
-  );
   const unreadNotifications = notificationsQuery.data?.unread || 0;
 
   const dismissToast = useCallback((id: number) => {
@@ -596,21 +566,66 @@ export default function App() {
 
   /* ---- Tabs ------------------------------------------------------------ */
 
-  /* Multi-device sync (P2, §6): persist the working set through settings. */
+  /* Tabs are a shared working set: the server is authoritative across devices;
+     localStorage is only the fast startup cache. */
+  const tabsReadyRef = useRef(false);
+  const tabsDirtyRef = useRef(false);
+  const tabsRevisionRef = useRef(0);
   useEffect(() => {
     setTabsServerSync((next) => {
-      void saveSettings({ openTabs: { order: next.order, pinned: next.pinned, activeId: next.activeId } }).catch(() => {});
+      if (!tabsReadyRef.current) return;
+      tabsDirtyRef.current = true;
+      void saveSharedTabs({ order: next.order, pinned: next.pinned, activeId: next.activeId })
+        .then((snapshot) => {
+          tabsRevisionRef.current = Math.max(tabsRevisionRef.current, snapshot.revision);
+          tabsDirtyRef.current = false;
+          queryClient.setQueryData(['shared-tabs'], snapshot);
+        })
+        .catch(() => { tabsDirtyRef.current = false; });
     });
     return () => setTabsServerSync(undefined);
-  }, []);
+  }, [queryClient]);
 
-  /* Adopt another device's tabs only when this one has none of its own. */
-  const adoptedTabsRef = useRef(false);
+  /* First load: replace stale per-device tabs with the server's shared set.
+     If this is the first device, seed the server from its local cache. */
+  const initializedSharedTabsRef = useRef(false);
   useEffect(() => {
-    if (adoptedTabsRef.current || !bootQuery.isFetched) return;
-    adoptedTabsRef.current = true;
-    adoptServerTabs(bootQuery.data?.openTabs);
-  }, [bootQuery.isFetched, bootQuery.data?.openTabs]);
+    if (initializedSharedTabsRef.current || !sharedTabsQuery.isFetched) return;
+    initializedSharedTabsRef.current = true;
+    const snapshot = sharedTabsQuery.data;
+    tabsRevisionRef.current = snapshot?.revision || 0;
+    if (snapshot?.openTabs) replaceTabsFromServer(snapshot.openTabs);
+    tabsReadyRef.current = true;
+
+    if (route.view === 'chat' && route.sessionId) {
+      openTab(route.sessionId);
+    } else if (snapshot?.openTabs?.activeId) {
+      openConversationById(snapshot.openTabs.activeId);
+    } else if (!snapshot?.openTabs) {
+      const local = getTabsState();
+      if (local.order.length) {
+        tabsDirtyRef.current = true;
+        void saveSharedTabs(local).then((saved) => {
+          tabsRevisionRef.current = Math.max(tabsRevisionRef.current, saved.revision);
+          tabsDirtyRef.current = false;
+          queryClient.setQueryData(['shared-tabs'], saved);
+        }).catch(() => { tabsDirtyRef.current = false; });
+      }
+    }
+  }, [sharedTabsQuery.isFetched, sharedTabsQuery.data, route.view, route.sessionId, openConversationById, queryClient]);
+
+  /* Poll the compact shared-tab snapshot so open/close/reorder/active changes
+     propagate between devices. Ignore older snapshots while a local save is
+     in flight; server revisions provide last-write-wins ordering. */
+  useEffect(() => {
+    const snapshot = sharedTabsQuery.data;
+    if (!tabsReadyRef.current || !snapshot || tabsDirtyRef.current || snapshot.revision <= tabsRevisionRef.current) return;
+    tabsRevisionRef.current = snapshot.revision;
+    replaceTabsFromServer(snapshot.openTabs);
+    const activeId = snapshot.openTabs?.activeId || null;
+    if (activeId && (route.view !== 'chat' || route.sessionId !== activeId)) openConversationById(activeId);
+    else if (!activeId && route.view === 'chat') navigate('home', undefined, true);
+  }, [sharedTabsQuery.data, route.view, route.sessionId, openConversationById, navigate]);
 
   /* The route stays the source of truth for the active tab. */
   useEffect(() => {
@@ -857,6 +872,16 @@ export default function App() {
     }
   }
 
+  async function saveInlineTitle(sessionId: string, title: string, revision?: number) {
+    await setSessionMeta(sessionId, { title }, revision);
+    void queryClient.invalidateQueries({ queryKey: ['overview'] });
+    if (route.sessionId === sessionId) void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+  }
+
+  async function suggestInlineTitle(sessionId: string) {
+    return (await suggestSessionTitle(sessionId)).title;
+  }
+
   async function updateSessionMeta(target: Session, patch: { title?: string | null; pinned?: boolean; hidden?: boolean }) {
     try {
       await setSessionMeta(target.id, patch);
@@ -976,8 +1001,6 @@ export default function App() {
         shortcutLabel={taskShortcut}
         running={runningSessions}
         attention={attentionSessions}
-        currentModel={currentModel}
-        usageStatus={usageStatus}
         unreadNotifications={unreadNotifications}
         archived={archivedQuery.data?.sessions}
         archivedLoading={archivedQuery.isPending && archivedOpen}
@@ -985,14 +1008,15 @@ export default function App() {
         onOpenSession={openSession}
         onOpenAgent={openAgentChat}
         onNewTask={openNewTask}
-        onSearch={() => setSearchOpen(true)}
         onOpenSystem={() => setSystemOpen(true)}
-        onOpenUsage={() => navigate('usage')}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onToggleArchived={toggleArchived}
         onToggleTheme={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
         onContextMenu={openSessionMenu}
         onMenuAt={openSessionMenuAt}
+        onSaveTitle={saveInlineTitle}
+        onRegenerateTitle={suggestInlineTitle}
+        onTitleError={(message) => showToast(message, true)}
       />
 
       <div className="min-h-0 min-w-0 flex-1 md:p-2">
@@ -1009,6 +1033,9 @@ export default function App() {
               onCloseOthers={handleCloseOthers}
               onCloseAll={handleCloseAll}
               onContextMenu={handleTabContextMenu}
+              onSaveTitle={saveInlineTitle}
+              onRegenerateTitle={suggestInlineTitle}
+              onTitleError={(message) => showToast(message, true)}
             />
           )}
           <div

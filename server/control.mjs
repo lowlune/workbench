@@ -448,6 +448,20 @@ function defaultModel(engine, projectId) {
     || catalog.find((model) => model.engine === engine && model.available !== false);
   return preferred?.id || null;
 }
+
+function saveOpenTabs(input) {
+  const order = [...new Set((Array.isArray(input?.order) ? input.order : [])
+    .filter((value) => typeof value === 'string' && value))].slice(0, 12);
+  const pinned = [...new Set((Array.isArray(input?.pinned) ? input.pinned : [])
+    .filter((value) => typeof value === 'string' && order.includes(value)))];
+  const activeId = typeof input?.activeId === 'string' && order.includes(input.activeId) ? input.activeId : null;
+  const previous = store.getSetting('openTabs', null);
+  const revision = Math.max(Date.now(), Number(previous?.revision || 0) + 1);
+  const openTabs = { order, pinned, activeId, revision };
+  store.setSetting('openTabs', openTabs);
+  return openTabs;
+}
+
 const withCapabilities = (session) => ({ ...session, capabilities: CAPABILITIES[session.engine] || {} });
 
 /* A queued follow-up admitted by the scheduler reuses the same worktree, so a
@@ -533,6 +547,38 @@ async function maybeGenerateTitle(conversationId, force = false) {
     tokens: { input: usage.prompt_tokens || 0, output: usage.completion_tokens || 0 },
   }, 'title-job');
   store.setSetting(settingKey, 'generated');
+}
+
+async function suggestTitle(conversationId) {
+  const first = store.db.prepare('SELECT input FROM commands WHERE conversation_id=? ORDER BY created,id LIMIT 1').get(conversationId);
+  let text = decode(first?.input, {}).text || '';
+  if (!text.trim()) {
+    const row = store.db.prepare(`SELECT data FROM messages WHERE conversation_id=? AND json_extract(data,'$.info.role')='user' ORDER BY created,id LIMIT 1`).get(conversationId);
+    const message = decode(row?.data, {});
+    text = (message.parts || []).filter((part) => part.type === 'text').map((part) => part.text || '').join(' ').trim();
+  }
+  if (!text.trim()) return null;
+  const result = await generateTitle({ conversationId, firstUserText: text });
+  // Keep the inline action useful during a title-provider outage. Use a
+  // sentence-sized prompt summary, but avoid junk titles from tiny prompts
+  // such as "a" by retaining the current meaningful title instead.
+  const currentTitle = store.conversation(conversationId).title || '';
+  const candidate = text.replace(/```[\s\S]*?```/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .split(/[.!?](?:\s|$)/, 1)[0]?.trim() || '';
+  const fallback = candidate.length >= 12
+    ? (candidate.length <= 72 ? candidate : `${candidate.slice(0, 69).replace(/\s+\S*$/, '')}…`)
+    : (currentTitle && !/^new conversation$/i.test(currentTitle) ? currentTitle : candidate || 'New conversation');
+  const title = result?.title || fallback;
+  if (!title) return null;
+  const usage = result?.usage || {};
+  const [, modelId] = String(result?.model || '').split('/');
+  if (result && modelId) store.recordUsage(`title-preview_${conversationId}_${Date.now()}`, conversationId, null, {
+    providerID: 'opencode-go', modelID,
+    tokens: { input: usage.prompt_tokens || 0, output: usage.completion_tokens || 0 },
+  }, 'title-preview');
+  return title;
 }
 
 /* ---- Legacy import (opencode.sqlite) ---- */
@@ -1132,6 +1178,16 @@ async function routes(req, res) {
     void refreshCatalog().catch(() => {});
     return json(res, 202, { refreshing: true });
   }
+  if (route === '/tabs' && method === 'GET') {
+    const openTabs = store.getSetting('openTabs', null);
+    return json(res, 200, { openTabs, revision: Number(openTabs?.revision || 0) });
+  }
+  if (route === '/tabs' && method === 'POST') {
+    const b = await body(req);
+    const openTabs = saveOpenTabs(b.openTabs || {});
+    return json(res, 200, { openTabs, revision: openTabs.revision });
+  }
+
   if (route === '/settings' && method === 'GET') {
     return json(res, 200, {
       maxRuns: maxRuns(),
@@ -1156,13 +1212,9 @@ async function routes(req, res) {
     if (b.defaultEngine === 'opencode' || b.defaultEngine === 'pi') store.setSetting('default.engine', b.defaultEngine);
     if (Array.isArray(b.favorites)) store.setSetting('favorites', b.favorites.filter((value) => typeof value === 'string').slice(0, 100));
     if (b.openTabs !== undefined) {
-      /* Cross-device working set. Tolerant of unknown
-         ids: the client reconciles them on bootstrap. */
-      const tabs = b.openTabs || {};
-      const order = (Array.isArray(tabs.order) ? tabs.order : []).filter((value) => typeof value === 'string' && value).slice(0, 64);
-      const pinned = (Array.isArray(tabs.pinned) ? tabs.pinned : []).filter((value) => typeof value === 'string' && order.includes(value));
-      const activeId = typeof tabs.activeId === 'string' && order.includes(tabs.activeId) ? tabs.activeId : null;
-      store.setSetting('openTabs', { order, pinned, activeId });
+      // Backwards compatibility for clients that still write tabs through
+      // /settings. New clients use the dedicated /tabs endpoint.
+      saveOpenTabs(b.openTabs || {});
     }
     if (b.maxRuns !== undefined) {
       const value = Number(b.maxRuns);
@@ -1402,6 +1454,12 @@ async function routes(req, res) {
       return json(res, 200, { resumed: true });
     }
     if (action === 'title') {
+      const b = await body(req);
+      if (b.preview === true) {
+        const title = await suggestTitle(c.id);
+        if (!title) throw fail('Could not generate a title for this conversation.', 409);
+        return json(res, 200, { title });
+      }
       await maybeGenerateTitle(c.id, true);
       return json(res, 200, { session: withCapabilities(store.view(store.conversation(c.id))) });
     }

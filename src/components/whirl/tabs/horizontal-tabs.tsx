@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type Key
 import { IconDots, IconPinFilled, IconPlus, IconX } from '@tabler/icons-react';
 import { DotsRing } from '@/components/loading-ui/dots-ring';
 import { formatDuration } from '@/lib/format';
+import { InlineTitleEditor } from '@/components/whirl/inline-title-editor';
 import type { TabView } from '@/lib/tabs';
 import { cn } from '@/lib/utils';
 
@@ -18,6 +19,9 @@ export function HorizontalTabs({
   onCloseOthers,
   onCloseAll,
   onContextMenu,
+  onSaveTitle,
+  onRegenerateTitle,
+  onTitleError,
 }: {
   tabs: TabView[];
   activeId?: string;
@@ -29,12 +33,19 @@ export function HorizontalTabs({
   onCloseOthers: (id: string) => void;
   onCloseAll: () => void;
   onContextMenu?: (event: ReactMouseEvent, id: string) => void;
+  onSaveTitle?: (id: string, title: string, revision?: number) => Promise<void>;
+  onRegenerateTitle?: (id: string) => Promise<string>;
+  onTitleError?: (message: string) => void;
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ id: string; position: 'before' | 'after' } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; originX: number; originY: number } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const activateTimerRef = useRef<number | undefined>(undefined);
   const listRef = useRef<HTMLDivElement>(null);
   const activeTab = tabs.find((tab) => tab.id === activeId);
+
+  useEffect(() => () => window.clearTimeout(activateTimerRef.current), []);
 
   useEffect(() => {
     if (!activeId) return;
@@ -124,7 +135,7 @@ export function HorizontalTabs({
             <div
               key={tab.id}
               data-session-row={tab.id}
-              draggable
+              draggable={editingId !== tab.id}
               onDragStart={(event) => dragStart(event, tab.id)}
               onDragOver={(event) => dragOver(event, tab.id)}
               onDrop={(event) => dropTab(event, tab.id)}
@@ -137,38 +148,63 @@ export function HorizontalTabs({
                 drop?.id === tab.id && (drop.position === 'before' ? 'shadow-[inset_2px_0_0_0_var(--primary)]' : 'shadow-[inset_-2px_0_0_0_var(--primary)]'),
               )}
             >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={active}
-                aria-controls="workbench-chat-panel"
-                tabIndex={active ? 0 : -1}
-                id={`workbench-tab-${tab.id}`}
-                title={hint}
-                onClick={() => onActivate(tab.id)}
-                onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); onClose(tab.id); } }}
-                className="flex max-w-[13rem] min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-6 pl-2.5 text-left"
-              >
-                <span aria-hidden="true" className="flex size-3 shrink-0 items-center justify-center">
-                  {working ? (
-                    <DotsRing className="size-3 text-foreground" />
-                  ) : (
-                    <span className={cn('size-1.5 rounded-full', failed ? 'bg-destructive' : needsAttention ? 'bg-amber-500' : 'bg-muted-foreground/40')} />
-                  )}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[12.5px]">{label}</span>
-                {tab.pinned && <IconPinFilled size={10} className="shrink-0 rotate-45 text-muted-foreground" aria-label="Pinned" />}
-              </button>
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label={`Close ${label}`}
-                onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}
-                onPointerDown={(event) => event.stopPropagation()}
-                className="absolute top-1/2 right-0.5 grid size-5 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/tab:opacity-100 hover:bg-background/70 hover:text-foreground focus-visible:opacity-100 coarse:opacity-100"
-              >
-                <IconX size={11} stroke={2.4} />
-              </button>
+              {editingId === tab.id && onSaveTitle && onRegenerateTitle ? (
+                <InlineTitleEditor
+                  initialValue={label}
+                  onSave={async (title) => { await onSaveTitle(tab.id, title, tab.revision); setEditingId(null); }}
+                  onRegenerate={() => onRegenerateTitle(tab.id)}
+                  onCancel={() => setEditingId(null)}
+                  onError={onTitleError}
+                  className="h-8 w-64 px-1"
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    aria-controls="workbench-chat-panel"
+                    tabIndex={active ? 0 : -1}
+                    id={`workbench-tab-${tab.id}`}
+                    title={`${hint}\nDouble-click to rename`}
+                    onClick={(event) => {
+                      if (event.detail > 1) return;
+                      window.clearTimeout(activateTimerRef.current);
+                      activateTimerRef.current = window.setTimeout(() => onActivate(tab.id), 220);
+                    }}
+                    onDoubleClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      window.clearTimeout(activateTimerRef.current);
+                      if (!onSaveTitle || !onRegenerateTitle) return;
+                      onActivate(tab.id);
+                      setEditingId(tab.id);
+                    }}
+                    onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); onClose(tab.id); } }}
+                    className="flex max-w-[13rem] min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-6 pl-2.5 text-left"
+                  >
+                    <span aria-hidden="true" className="flex size-3 shrink-0 items-center justify-center">
+                      {working ? (
+                        <DotsRing className="size-3 text-foreground" />
+                      ) : (
+                        <span className={cn('size-1.5 rounded-full', failed ? 'bg-destructive' : needsAttention ? 'bg-amber-500' : 'bg-muted-foreground/40')} />
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px]">{label}</span>
+                    {tab.pinned && <IconPinFilled size={10} className="shrink-0 rotate-45 text-muted-foreground" aria-label="Pinned" />}
+                  </button>
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    aria-label={`Close ${label}`}
+                    onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    className="absolute top-1/2 right-0.5 grid size-5 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/tab:opacity-100 hover:bg-background/70 hover:text-foreground focus-visible:opacity-100 coarse:opacity-100"
+                  >
+                    <IconX size={11} stroke={2.4} />
+                  </button>
+                </>
+              )}
             </div>
           );
         })}

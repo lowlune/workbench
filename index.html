@@ -4,8 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f3f3f3" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#202020" />
+    <meta name="theme-color" content="#f3f3f3" />
     <meta name="description" content="A calm workspace for your coding agents." />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg?v=3" type="image/svg+xml" />
@@ -14,8 +13,35 @@
     <title>Workbench</title>
   </head>
   <body>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem('workbench-theme');
+        const dark = savedTheme === 'dark' || (savedTheme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#202020' : '#f3f3f3');
+      } catch {}
+    </script>
     <div id="root">
-      <div class="app-loading" role="status" aria-live="polite">Opening your workspace…</div>
+      <div class="app-loading" role="status" aria-label="Loading Workbench">
+        <aside class="app-loading-rail" aria-hidden="true">
+          <div class="app-loading-brand"></div>
+          <div class="app-loading-nav">
+            <div class="app-loading-row"></div><div class="app-loading-row"></div><div class="app-loading-row"></div>
+          </div>
+          <div class="app-loading-nav" style="margin-top:auto">
+            <div class="app-loading-row"></div><div class="app-loading-row"></div>
+          </div>
+        </aside>
+        <main class="app-loading-main" aria-hidden="true">
+          <div class="app-loading-top"><div class="app-loading-tab"></div></div>
+          <div class="app-loading-body">
+            <div class="app-loading-title"></div>
+            <div class="app-loading-line"></div><div class="app-loading-line short"></div>
+            <div class="app-loading-line"></div><div class="app-loading-line short"></div>
+            <div class="app-loading-composer"></div>
+          </div>
+        </main>
+      </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

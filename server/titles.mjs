@@ -10,11 +10,12 @@ import path from 'node:path';
 const HOME = process.env.HOME || os.homedir();
 const AUTH_FILE = path.join(HOME, '.local/share/opencode/auth.json');
 const BASE_URL = 'https://opencode.ai/zen/go/v1';
-const FAST_MODEL = 'deepseek-v4-flash';
+const FAST_MODEL = 'deepseek-v4.1-flash';
 
 function sanitizeTitle(value) {
   return String(value || '')
     .replace(/["'“”`]/g, '')
+    .replace(/^(title|conversation title)\s*:\s*/i, '')
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -41,11 +42,11 @@ export async function generateTitle({ conversationId, firstUserText }) {
       body: JSON.stringify({
         model: FAST_MODEL,
         messages: [
-          { role: 'system', content: 'You name coding conversations. Reply with a 3 to 6 word title only. No quotes, no punctuation at the end, no explanation.' },
-          { role: 'user', content: `First user message:\n${String(firstUserText || '').slice(0, 2000)}\n\nTitle:` },
+          { role: 'system', content: 'Create a concise, specific title for a coding conversation. Write in the same language as the user. Summarize the requested outcome, not the instruction to do it. Preserve project, product, company, and person names. Prefer 4–7 meaningful words; avoid generic titles such as "Help me", "Coding task", or "Website work". Return only the title, with no quotes, prefix, explanation, or ending punctuation.' },
+          { role: 'user', content: `Conversation request:\n${String(firstUserText || '').slice(0, 3000)}\n\nSpecific title:` },
         ],
-        max_tokens: 512,
-        temperature: 0.2,
+        max_tokens: 80,
+        temperature: 0.1,
       }),
       signal: AbortSignal.timeout(20_000),
     });

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getOverview, getSystem } from './api';
-import { archivedConversations, bootstrap, health, notifications, offerings, usagePacing, usageReport } from './workbench';
+import { archivedConversations, bootstrap, health, notifications, offerings, sharedTabs, usagePacing, usageReport } from './workbench';
 
 // SSE supplies normal updates. Polls are visible-tab repair, with expensive
 // telemetry enabled only while its panel is open.
@@ -14,6 +14,8 @@ export function useConsoleQueries({ settingsOpen, archivedOpen }: {
   const systemQuery = useQuery({ queryKey: ['system'], queryFn: getSystem,
     refetchInterval: 30_000, refetchIntervalInBackground: false, staleTime: 10_000, retry: 1 });
   const bootQuery = useQuery({ queryKey: ['bootstrap'], queryFn: bootstrap, staleTime: 30_000 });
+  const sharedTabsQuery = useQuery({ queryKey: ['shared-tabs'], queryFn: sharedTabs,
+    refetchInterval: 3000, refetchIntervalInBackground: false, staleTime: 1000, retry: 1 });
   const modelsQuery = useQuery({ queryKey: ['model-offerings'], queryFn: offerings, staleTime: 60_000, retry: 1 });
   const pacingQuery = useQuery({ queryKey: ['usage-pacing'], queryFn: usagePacing, staleTime: 30_000, retry: 1 });
   const weeklyUsageQuery = useQuery({ queryKey: ['usage', '7', ''], queryFn: () => usageReport(7),
@@ -24,6 +26,6 @@ export function useConsoleQueries({ settingsOpen, archivedOpen }: {
     enabled: archivedOpen, staleTime: 15_000, retry: 1 });
   const healthQuery = useQuery({ queryKey: ['health'], queryFn: health,
     enabled: settingsOpen, refetchInterval: 30_000, refetchIntervalInBackground: false, staleTime: 5000, retry: 1 });
-  return { overviewQuery, systemQuery, bootQuery, modelsQuery, pacingQuery, weeklyUsageQuery,
+  return { overviewQuery, systemQuery, bootQuery, sharedTabsQuery, modelsQuery, pacingQuery, weeklyUsageQuery,
     notificationsQuery, archivedQuery, healthQuery };
 }

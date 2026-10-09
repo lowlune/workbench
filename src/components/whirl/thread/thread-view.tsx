@@ -3,14 +3,21 @@ import { IconArrowDown, IconLoader2 } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { AssistantMessage } from '@/components/whirl/thread/assistant-message';
 import { UserMessage } from '@/components/whirl/thread/user-message';
+import { isToolPart, uniqueToolParts } from '@/components/whirl/thread/tool-data';
 import { cn } from '@/lib/utils';
 import type { FileRef } from '@/components/whirl/file-viewer';
-import type { Message } from '@/lib/types';
+import type { Message, MessagePart } from '@/lib/types';
 
 function isEmptyAssistant(message: Message) {
   return message.info.role === 'assistant'
     && !(message.parts || []).some((part) => (part.type === 'text' && String(part.text || '').trim())
       || ['tool', 'file', 'reasoning', 'step-start', 'step-finish'].includes(part.type));
+}
+
+interface DisplayRow {
+  message: Message;
+  toolParts?: MessagePart[];
+  hideTools?: boolean;
 }
 
 /* The transcript: scrolls at the live edge while the agent writes and stays
@@ -53,17 +60,43 @@ export function ThreadView({
     return (messages || []).filter((message) => Boolean(message?.info) && Array.isArray(message.parts) && !isEmptyAssistant(message) && !(message.commandId && hiddenCommandIds?.has(message.commandId)));
   }, [messages, hiddenCommandIds]);
 
-  const virtual = useVirtualizer({ count: rows.length, getScrollElement: () => viewportRef.current,
-    estimateSize: () => 180, overscan: 8, enabled: rows.length > 80,
+  /* Several assistant messages can belong to one command. Aggregate all of its
+     tool parts and show them exactly once on the command's latest assistant
+     row, so the single counter grows instead of repeating per-message counts. */
+  const displayRows = useMemo(() => {
+    const groups = new Map<string, { parts: MessagePart[]; anchorId: string }>();
+    for (const message of rows) {
+      if (message.info.role !== 'assistant' || !message.commandId) continue;
+      const group = groups.get(message.commandId) || { parts: [], anchorId: message.id };
+      const calls = uniqueToolParts(message.parts);
+      if (calls.length) group.parts = uniqueToolParts([...group.parts, ...calls]);
+      group.anchorId = message.id;
+      groups.set(message.commandId, group);
+    }
+    const output: DisplayRow[] = [];
+    for (const message of rows) {
+      const group = message.info.role === 'assistant' && message.commandId ? groups.get(message.commandId) : undefined;
+      if (!group?.parts.length) { output.push({ message }); continue; }
+      if (message.id === group.anchorId) { output.push({ message, toolParts: group.parts }); continue; }
+      const hasVisibleContent = message.parts.some((part) => !isToolPart(part)
+        && ((part.type === 'text' && String(part.text || '').trim()) || part.type === 'file'));
+      if (hasVisibleContent) output.push({ message, hideTools: true });
+    }
+    return output;
+  }, [rows]);
+
+  const virtual = useVirtualizer({ count: displayRows.length, getScrollElement: () => viewportRef.current,
+    estimateSize: () => 180, overscan: 8, enabled: displayRows.length > 80,
     /* The virtualizer can ask for an index from the previous (longer) list for
        one frame after a tab switch; stay in bounds instead of throwing. */
-    getItemKey: (index) => rows[index]?.id ?? index });
-  function renderRow(message: Message) {
+    getItemKey: (index) => displayRows[index]?.message.id ?? index });
+  function renderRow(row: DisplayRow) {
+    const { message } = row;
     return (
       <div data-message-id={message.id}>
         {message.info.role === 'user'
           ? <UserMessage message={message} />
-          : <AssistantMessage message={message} isWorking={isWorking && message === rows.at(-1)} onOpenFile={onOpenFile} />}
+          : <AssistantMessage message={message} isWorking={isWorking && message === displayRows.at(-1)?.message} onOpenFile={onOpenFile} toolParts={row.toolParts} hideTools={row.hideTools} />}
       </div>
     );
   }
@@ -113,21 +146,21 @@ export function ThreadView({
             <div className="flex h-[40vh] items-center justify-center">
               <IconLoader2 size={20} className="animate-spin text-muted-foreground" />
             </div>
-          ) : rows.length === 0 ? (
+          ) : displayRows.length === 0 ? (
             <div className="flex h-[40vh] flex-col items-center justify-center gap-2 text-center">
               <p className="text-[15px]/6 font-medium">Ready when you are.</p>
               <p className="max-w-sm text-[13px]/5 text-muted-foreground">Send a message below to continue this conversation.</p>
             </div>
-          ) : rows.length > 80 ? (
+          ) : displayRows.length > 80 ? (
             <div style={{ height: virtual.getTotalSize(), position: 'relative', width: '100%' }}>
               {virtual.getVirtualItems().map((item) => {
-                const row = rows[item.index];
+                const row = displayRows[item.index];
                 if (!row) return null;
                 return (
                   <div
                     key={item.key}
                     data-index={item.index}
-                    data-message-id={row.id}
+                    data-message-id={row.message.id}
                     ref={virtual.measureElement}
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
                     className="pb-7"
@@ -139,7 +172,7 @@ export function ThreadView({
             </div>
           ) : (
             <div className="flex flex-col gap-7">
-              {rows.map((row) => <div key={row.id}>{renderRow(row)}</div>)}
+              {displayRows.map((row) => <div key={row.message.id}>{renderRow(row)}</div>)}
             </div>
           )}
         </div>

@@ -16,9 +16,6 @@ export function ToolCard({ part, onOpenFile }: { part: MessagePart; onOpenFile?:
    Hover is just a fine dotted underline, never a full-width fill. */
 export function ToolActivity({ tools, onOpenFile }: { tools: MessagePart[]; onOpenFile?: OpenFile }) {
   if (!tools.length) return null;
-  if (tools.length === 1) {
-    return <ToolRenderer view={classifyPart(tools[0])} onOpenFile={onOpenFile} />;
-  }
   const active = tools.some((part) => ['running', 'pending', 'starting'].includes(String(part.state?.status || '')));
   return (
     <details className="wb-disclosure group/activity w-full min-w-0">
@@ -26,7 +23,7 @@ export function ToolActivity({ tools, onOpenFile }: { tools: MessagePart[]; onOp
         {active
           ? <IconLoader2 size={13} className="shrink-0 animate-spin" aria-hidden="true" />
           : <IconTool size={13} className="shrink-0 text-muted-foreground/70" aria-hidden="true" />}
-        <span className="shrink-0">tool calls</span>
+        <span className="shrink-0">Tool calls</span>
         <span className="tabular-nums">{tools.length}</span>
         <IconChevronRight size={12} className="shrink-0 text-muted-foreground/60 transition-transform duration-150 group-open/activity:rotate-90" />
       </summary>

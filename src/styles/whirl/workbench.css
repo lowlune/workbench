@@ -7,13 +7,57 @@
   line-height: 1.5rem;
 }
 
-/* Pre-hydration placeholder in index.html. */
+/* Pre-hydration shell: match the real app silhouette and current theme before
+   React loads, so hard refreshes never flash a blank/light page. */
 .app-loading {
+  --skel: rgb(127 127 127 / 0.14);
+  --skel-strong: rgb(127 127 127 / 0.2);
   display: grid;
-  place-items: center;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 0.75rem;
   height: 100dvh;
-  font-size: 15px;
-  color: var(--muted-foreground);
+  min-height: 0;
+  padding: 0.75rem;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+}
+.app-loading-rail {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+}
+.app-loading-brand, .app-loading-row, .app-loading-title, .app-loading-line, .app-loading-composer, .app-loading-tab {
+  background: var(--skel);
+  animation: app-loading-pulse 1.35s ease-in-out infinite alternate;
+}
+.app-loading-brand { width: 8.5rem; height: 1.2rem; border-radius: 999px; background: var(--skel-strong); }
+.app-loading-nav { display: grid; gap: 0.55rem; }
+.app-loading-row { width: 100%; height: 2rem; border-radius: var(--radius-md); }
+.app-loading-row:nth-child(2n) { width: 82%; }
+.app-loading-main {
+  display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--surface);
+}
+.app-loading-top { display: flex; height: 2.5rem; align-items: center; gap: 0.4rem; padding: 0 0.75rem; border-bottom: 1px solid var(--border); }
+.app-loading-tab { width: 7.5rem; height: 1.35rem; border-radius: var(--radius-md); }
+.app-loading-body { display: flex; width: min(100%, 52rem); flex: 1; flex-direction: column; gap: 1rem; margin: 0 auto; padding: clamp(2rem, 8vh, 5rem) 1.5rem 1.5rem; }
+.app-loading-title { width: min(18rem, 65%); height: 1.7rem; margin-bottom: 0.5rem; border-radius: var(--radius-md); background: var(--skel-strong); }
+.app-loading-line { width: min(34rem, 88%); height: 0.85rem; border-radius: 999px; }
+.app-loading-line.short { width: min(24rem, 66%); }
+.app-loading-composer { height: 7.25rem; margin-top: auto; border: 1px solid var(--border); border-radius: var(--radius-3xl); background: var(--well); }
+@keyframes app-loading-pulse { from { opacity: 0.55; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .app-loading-brand, .app-loading-row, .app-loading-title, .app-loading-line, .app-loading-composer, .app-loading-tab { animation: none; } }
+@media (max-width: 767px) {
+  .app-loading { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0; }
+  .app-loading-rail { display: none; }
+  .app-loading-main { border: 0; border-radius: 0; }
+  .app-loading-body { padding-top: 18vh; padding-bottom: 5rem; }
 }
 
 /* Thread prose. Mirrors the rhythm Whirl's streamdown build paints: compact

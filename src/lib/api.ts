@@ -147,16 +147,30 @@ export async function regenerateSessionTitle(sessionId: string) {
   return { sessionId, title: result.session.title || '', tags: result.session.tags || [] };
 }
 
-async function patchConversation(sessionId: string, patch: Record<string, unknown>) {
-  const { session } = await getSession(sessionId);
-  return v2<{ session: Session }>(`/conversations/${encodeURIComponent(sessionId)}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ ...patch, revision: session.revision }),
+export async function suggestSessionTitle(sessionId: string) {
+  return v2<{ title: string }>(`/conversations/${encodeURIComponent(sessionId)}/title`, {
+    method: 'POST', body: JSON.stringify({ preview: true }),
   });
 }
 
-export async function setSessionMeta(sessionId: string, patch: { title?: string | null; pinned?: boolean; hidden?: boolean; projectId?: string | null; directory?: string | null; workspace?: string | null }) {
-  const result = await patchConversation(sessionId, patch);
+async function patchConversation(sessionId: string, patch: Record<string, unknown>, knownRevision?: number) {
+  const revision = knownRevision ?? (await getSession(sessionId)).session.revision;
+  return v2<{ session: Session }>(`/conversations/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ ...patch, revision }),
+  });
+}
+
+export async function setSessionMeta(sessionId: string, patch: { title?: string | null; pinned?: boolean; hidden?: boolean; projectId?: string | null; directory?: string | null; workspace?: string | null }, knownRevision?: number) {
+  let result: { session: Session };
+  try { result = await patchConversation(sessionId, patch, knownRevision); }
+  catch (error) {
+    // Inline rename uses the revision already held by the tab/row for a single
+    // fast PATCH. If another device changed the conversation meanwhile, fetch
+    // the fresh revision once and retry instead of making Save feel broken.
+    if (knownRevision === undefined || !(error instanceof ApiError) || error.status !== 409) throw error;
+    result = await patchConversation(sessionId, patch);
+  }
   return {
     sessionId,
     title: result.session.title || null,

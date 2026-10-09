@@ -1,9 +1,7 @@
-import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   IconBell,
-  IconBolt,
   IconChartBar,
-  IconClipboardText,
   IconClock,
   IconDots,
   IconHome,
@@ -11,10 +9,10 @@ import {
   IconLogout,
   IconMoon,
   IconPlus,
-  IconSearch,
   IconSun,
 } from '@tabler/icons-react';
 import { ChatRow } from '@/components/whirl/chat-row';
+import { InlineTitleEditor } from '@/components/whirl/inline-title-editor';
 import { DotsRing } from '@/components/loading-ui/dots-ring';
 import type { Agent, Attention, Overview, RunState, Session, SystemSnapshot } from '@/lib/types';
 import { attentionOf, isRunningSession, runStateOf, runStatusLabel } from '@/lib/workbench';
@@ -22,20 +20,6 @@ import { formatDuration } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 export type AppView = 'home' | 'history' | 'clips' | 'usage' | 'chat';
-
-type SessionFilter = 'all' | 'running' | 'archived';
-
-export interface CurrentModelChip {
-  id: string;
-  name: string;
-  provider?: string;
-}
-
-export interface UsageStatusChip {
-  label: string;
-  percent?: number;
-  tone: 'ok' | 'warn' | 'over';
-}
 
 /* Whirl's rail: chrome on the grey background, one hover tone for every
    row, section rules instead of boxes. */
@@ -48,22 +32,21 @@ export function Sidebar({
   theme,
   running,
   attention,
-  currentModel,
-  usageStatus,
   unreadNotifications,
   archived,
   archivedLoading,
   onNavigate,
   onOpenSession,
   onNewTask,
-  onSearch,
   onOpenSystem,
-  onOpenUsage,
   onOpenNotifications,
   onToggleArchived,
   onToggleTheme,
   onContextMenu,
   onMenuAt,
+  onSaveTitle,
+  onRegenerateTitle,
+  onTitleError,
 }: {
   view: AppView;
   overview?: Overview;
@@ -74,8 +57,6 @@ export function Sidebar({
   shortcutLabel?: string;
   running: Session[];
   attention: Session[];
-  currentModel?: CurrentModelChip | null;
-  usageStatus?: UsageStatusChip | null;
   unreadNotifications?: number;
   archived?: Session[];
   archivedLoading?: boolean;
@@ -83,25 +64,22 @@ export function Sidebar({
   onOpenSession: (session: Session) => void;
   onOpenAgent: (agent: Agent) => void;
   onNewTask: () => void;
-  onSearch: () => void;
   onOpenSystem: () => void;
-  onOpenUsage: () => void;
   onOpenNotifications: () => void;
   onToggleArchived: (open: boolean) => void;
   onToggleTheme: () => void;
   onContextMenu?: (event: ReactMouseEvent, session: Session) => void;
   onMenuAt?: (x: number, y: number, session: Session) => void;
+  onSaveTitle?: (sessionId: string, title: string, revision?: number) => Promise<void>;
+  onRegenerateTitle?: (sessionId: string) => Promise<string>;
+  onTitleError?: (message: string) => void;
 }) {
-  const [filter, setFilter] = useState<SessionFilter>('all');  const attentionIds = new Set(attention.map((session) => session.id));
+  const attentionIds = new Set(attention.map((session) => session.id));
   const runningIds = new Set(running.map((session) => session.id));
   const history = (overview?.sessions || []).filter((session) => !runningIds.has(session.id) && !attentionIds.has(session.id));
-  const runningView = filter === 'running'
-    ? [...running, ...attention.filter((session) => !runningIds.has(session.id))]
-    : running;
-
   useEffect(() => {
-    onToggleArchived(filter === 'archived');
-  }, [filter, onToggleArchived]);
+    onToggleArchived(false);
+  }, [onToggleArchived]);
 
   return (
     <aside className="hidden h-full w-[17rem] shrink-0 flex-col gap-1 px-2 pt-2 pb-2 md:flex" aria-label="Workspace navigation">
@@ -134,28 +112,6 @@ export function Sidebar({
 
       <button
         type="button"
-        onClick={onOpenUsage}
-        title="Current provider, model and usage"
-        className="flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-accent"
-      >
-        <IconBolt size={14} className="shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-left">
-          {currentModel
-            ? <>{currentModel.provider && <span className="text-muted-foreground">{currentModel.provider} · </span>}{currentModel.name}</>
-            : <span className="text-muted-foreground">No model selected</span>}
-        </span>
-        {usageStatus && (
-          <span className={cn(
-            'shrink-0 text-[10px] tabular-nums',
-            usageStatus.tone === 'over' ? 'text-destructive' : usageStatus.tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
-          )}>
-            {usageStatus.label}
-          </span>
-        )}
-      </button>
-
-      <button
-        type="button"
         onClick={onNewTask}
         className="flex h-8 w-full cursor-pointer items-center justify-start gap-2 rounded-md px-2 text-[13px] font-medium text-foreground transition-colors duration-150 hover:bg-accent"
       >
@@ -164,34 +120,14 @@ export function Sidebar({
       </button>
 
       <nav className="-mt-1.5 flex flex-col gap-0.5">
-        <SidebarRow Icon={IconHome} label="Home" active={view === 'home'} onClick={() => onNavigate('home')} />
-        <SidebarRow Icon={IconSearch} label="Search" hint="⌘K" onClick={onSearch} />
         <SidebarRow Icon={IconClock} label="History" active={view === 'history'} onClick={() => onNavigate('history')} />
-        <SidebarRow Icon={IconClipboardText} label="Clipboard" active={view === 'clips'} onClick={() => onNavigate('clips')} />
         <SidebarRow Icon={IconChartBar} label="Usage & models" active={view === 'usage'} onClick={() => onNavigate('usage')} />
       </nav>
 
       <div role="separator" className="mx-1.5 h-px shrink-0 bg-border" />
 
-      <div className="flex items-center gap-0.5 px-1">
-        {(['all', 'running', 'archived'] as const).map((value) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => setFilter(value)}
-            aria-pressed={filter === value}
-            className={cn(
-              'flex-1 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium capitalize transition-[color,background-color,scale] duration-100 active:scale-[0.98]',
-              filter === value ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
-            )}
-          >
-            {value}
-          </button>
-        ))}
-      </div>
-
       <div className="wb-scroll -mx-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-1 pb-1">
-        {filter === 'archived' ? (
+        {archivedLoading ? (
           <ArchivedList
             sessions={archived}
             loading={archivedLoading}
@@ -199,67 +135,39 @@ export function Sidebar({
             onOpenSession={onOpenSession}
             onContextMenu={onContextMenu}
             onMenuAt={onMenuAt}
+            onSaveTitle={onSaveTitle}
+            onRegenerateTitle={onRegenerateTitle}
+            onTitleError={onTitleError}
           />
         ) : (
           <>
-            {runningView.length > 0 && (
+            {running.filter((session) => !attentionIds.has(session.id)).length > 0 && (
               <section className="flex flex-col gap-0.5">
                 <SectionLabel>Running</SectionLabel>
-                {runningView.map((session) => (
-                  <RunRow
-                    key={session.id}
-                    session={session}
-                    active={session.id === selectedSessionId}
-                    attention={attentionOf(session)}
-                    onOpen={onOpenSession}
-                    onContextMenu={onContextMenu}
-                    onMenuAt={onMenuAt}
-                  />
+                {running.filter((session) => !attentionIds.has(session.id)).map((session) => (
+                  <RunRow key={session.id} session={session} active={session.id === selectedSessionId} attention={attentionOf(session)} onOpen={onOpenSession} onContextMenu={onContextMenu} onMenuAt={onMenuAt} onSaveTitle={onSaveTitle} onRegenerateTitle={onRegenerateTitle} onTitleError={onTitleError} />
                 ))}
               </section>
             )}
-
-            {filter === 'running' && runningView.length === 0 && (
-              <p className="px-2.5 py-1.5 text-[12px] text-muted-foreground">No runs in progress.</p>
-            )}
-
-            {filter === 'all' && attention.length > 0 && (
+            {attention.length > 0 && (
               <section className="flex flex-col gap-0.5">
                 <SectionLabel>Needs attention</SectionLabel>
                 {attention.map((session) => (
-                  <RunRow
-                    key={session.id}
-                    session={session}
-                    active={session.id === selectedSessionId}
-                    attention={attentionOf(session)}
-                    onOpen={onOpenSession}
-                    onContextMenu={onContextMenu}
-                    onMenuAt={onMenuAt}
-                  />
+                  <RunRow key={session.id} session={session} active={session.id === selectedSessionId} attention={attentionOf(session)} onOpen={onOpenSession} onContextMenu={onContextMenu} onMenuAt={onMenuAt} onSaveTitle={onSaveTitle} onRegenerateTitle={onRegenerateTitle} onTitleError={onTitleError} />
                 ))}
               </section>
             )}
-
-            {filter === 'all' && (
-              history.length === 0 && running.length === 0 && attention.length === 0 ? (
-                <p className="px-2.5 py-1.5 text-[12px] text-muted-foreground">No conversations yet.</p>
-              ) : (
-                groupSessions(history.slice(0, 40)).map(([label, items]) => (
-                  <section key={label} className="flex flex-col gap-0.5">
-                    <SectionLabel>{label}</SectionLabel>
-                    {items.map((session) => (
-                      <ChatRow
-                        key={session.id}
-                        session={session}
-                        active={session.id === selectedSessionId}
-                        onOpen={onOpenSession}
-                        onContextMenu={onContextMenu}
-                        onMenuAt={onMenuAt}
-                      />
-                    ))}
-                  </section>
-                ))
-              )
+            {history.length === 0 && running.length === 0 && attention.length === 0 ? (
+              <p className="px-2.5 py-1.5 text-[12px] text-muted-foreground">No conversations yet.</p>
+            ) : (
+              groupSessions(history.slice(0, 40)).map(([label, items]) => (
+                <section key={label} className="flex flex-col gap-0.5">
+                  <SectionLabel>{label}</SectionLabel>
+                  {items.map((session) => (
+                    <ChatRow key={session.id} session={session} active={session.id === selectedSessionId} onOpen={onOpenSession} onContextMenu={onContextMenu} onMenuAt={onMenuAt} onSaveTitle={onSaveTitle} onRegenerateTitle={onRegenerateTitle} onTitleError={onTitleError} />
+                  ))}
+                </section>
+              ))
             )}
           </>
         )}
@@ -302,6 +210,9 @@ function ArchivedList({
   onOpenSession,
   onContextMenu,
   onMenuAt,
+  onSaveTitle,
+  onRegenerateTitle,
+  onTitleError,
 }: {
   sessions?: Session[];
   loading?: boolean;
@@ -309,6 +220,9 @@ function ArchivedList({
   onOpenSession: (session: Session) => void;
   onContextMenu?: (event: ReactMouseEvent, session: Session) => void;
   onMenuAt?: (x: number, y: number, session: Session) => void;
+  onSaveTitle?: (sessionId: string, title: string, revision?: number) => Promise<void>;
+  onRegenerateTitle?: (sessionId: string) => Promise<string>;
+  onTitleError?: (message: string) => void;
 }) {
   if (loading) return <p className="px-2.5 py-1.5 text-[12px] text-muted-foreground">Loading archived…</p>;
   if (!sessions?.length) return <p className="px-2.5 py-1.5 text-[12px] text-muted-foreground">No archived conversations.</p>;
@@ -323,6 +237,9 @@ function ArchivedList({
           onOpen={onOpenSession}
           onContextMenu={onContextMenu}
           onMenuAt={onMenuAt}
+          onSaveTitle={onSaveTitle ? (_session, title) => onSaveTitle(session.id, title, session.revision) : undefined}
+          onRegenerateTitle={onRegenerateTitle ? () => onRegenerateTitle(session.id) : undefined}
+          onTitleError={onTitleError}
         />
       ))}
       <p className="px-2.5 py-1 text-[10.5px] text-muted-foreground/70">Right-click a row to restore.</p>
@@ -401,6 +318,9 @@ function RunRow({
   onOpen,
   onContextMenu,
   onMenuAt,
+  onSaveTitle,
+  onRegenerateTitle,
+  onTitleError,
 }: {
   session: Session;
   active: boolean;
@@ -408,7 +328,13 @@ function RunRow({
   onOpen: (session: Session) => void;
   onContextMenu?: (event: ReactMouseEvent, session: Session) => void;
   onMenuAt?: (x: number, y: number, session: Session) => void;
+  onSaveTitle?: (sessionId: string, title: string, revision?: number) => Promise<void>;
+  onRegenerateTitle?: (sessionId: string) => Promise<string>;
+  onTitleError?: (message: string) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const openTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(openTimerRef.current), []);
   const state: RunState | null = runStateOf(session);
   const started = session.activeRun?.started;
   const elapsed = started ? formatDuration((Date.now() - started) / 1000) : '';
@@ -421,27 +347,47 @@ function RunRow({
 
   return (
     <div data-session-row={session.id} className={cn('group/row relative flex w-full min-w-0 items-center rounded-md transition-[color,background-color,scale] duration-100 active:scale-[0.98]', active ? 'bg-accent' : 'hover:bg-accent')}>
-      <button
-        type="button"
-        onClick={() => onOpen(session)}
-        onContextMenu={(event) => onContextMenu?.(event, session)}
-        className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-md py-1.5 pr-7 pl-2 text-left"
-      >
-        <span className="mt-[3px] flex size-3.5 shrink-0 items-center justify-center">
-          {working ? (
-            <DotsRing className="size-3.5 text-foreground" aria-hidden="true" />
-          ) : (
-            <span aria-hidden="true" className={cn('size-1.5 rounded-full', needsAttention ? 'bg-amber-500' : 'bg-muted-foreground/50')} />
-          )}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px]">{session.title || 'Conversation'}</span>
-          <span className={cn('block truncate text-[11px] tabular-nums', needsAttention ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground')}>
-            {meta}
+      <span className="ml-2 mt-[3px] flex size-3.5 shrink-0 items-center justify-center">
+        {working ? <DotsRing className="size-3.5 text-foreground" aria-hidden="true" /> : <span aria-hidden="true" className={cn('size-1.5 rounded-full', needsAttention ? 'bg-amber-500' : 'bg-muted-foreground/50')} />}
+      </span>
+      {editing && onSaveTitle && onRegenerateTitle ? (
+        <div className="min-w-0 flex-1 px-1 py-1">
+          <InlineTitleEditor
+            initialValue={session.title || ''}
+            onSave={async (title) => { await onSaveTitle(session.id, title, session.revision); setEditing(false); }}
+            onRegenerate={() => onRegenerateTitle(session.id)}
+            onCancel={() => setEditing(false)}
+            onError={onTitleError}
+          />
+          <span className={cn('block truncate text-[11px] tabular-nums', needsAttention ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground')}>{meta}</span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={(event) => {
+            if (event.detail > 1) return;
+            window.clearTimeout(openTimerRef.current);
+            openTimerRef.current = window.setTimeout(() => onOpen(session), 220);
+          }}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            window.clearTimeout(openTimerRef.current);
+            if (!onSaveTitle || !onRegenerateTitle) return;
+            onOpen(session);
+            setEditing(true);
+          }}
+          onContextMenu={(event) => onContextMenu?.(event, session)}
+          title="Double-click to rename"
+          className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-md py-1.5 pr-7 pl-2 text-left"
+        >
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px]">{session.title || 'Conversation'}</span>
+            <span className={cn('block truncate text-[11px] tabular-nums', needsAttention ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground')}>{meta}</span>
           </span>
-        </span>
-      </button>
-      <button
+        </button>
+      )}
+      {!editing && <button
         type="button"
         aria-label={`Actions for ${session.title || 'conversation'}`}
         onClick={(event) => {
@@ -451,7 +397,7 @@ function RunRow({
         className="absolute top-1/2 right-1 grid size-6 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-foreground-soft opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 hover:bg-accent focus-visible:opacity-100 coarse:opacity-100"
       >
         <IconDots size={15} />
-      </button>
+      </button>}
     </div>
   );
 }

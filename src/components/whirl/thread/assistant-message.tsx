@@ -7,7 +7,7 @@ import { SystemMessage, normalText, systemTexts } from '@/components/whirl/threa
 import { uniqueToolParts } from '@/components/whirl/thread/tool-data';
 import { formatTokens, messageContext } from '@/lib/format';
 import type { FileRef } from '@/components/whirl/file-viewer';
-import type { Message } from '@/lib/types';
+import type { Message, MessagePart } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 /* One assistant turn: prose first, tool runs beneath it, then the quiet
@@ -17,14 +17,19 @@ export const AssistantMessage = memo(function AssistantMessage({
   message,
   isWorking,
   onOpenFile,
+  toolParts,
+  hideTools = false,
 }: {
   message: Message;
   isWorking: boolean;
   onOpenFile?: (file: FileRef) => void;
+  /** Aggregated calls for this command, rendered once on its final assistant row. */
+  toolParts?: MessagePart[];
+  hideTools?: boolean;
 }) {
   const text = normalText(message);
   const notices = systemTexts(message);
-  const tools = uniqueToolParts(message.parts);
+  const tools = hideTools ? [] : toolParts || uniqueToolParts(message.parts);
   const images = message.parts.filter((part) => part.type === 'file' && part.mime?.startsWith('image/') && part.url);
   const context = messageContext(message);
   const model = message.info.modelName || message.info.modelID;

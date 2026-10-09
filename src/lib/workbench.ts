@@ -27,6 +27,14 @@ export const usageReport = (days: number, projectId?: string) => v2<UsageRespons
 
 export const archivedConversations = () => v2<{ sessions: Session[]; nextCursor?: string | null }>('/conversations?hidden=true');
 
+export interface SharedTabsSnapshot {
+  openTabs: { order: string[]; pinned: string[]; activeId: string | null; revision?: number } | null;
+  revision: number;
+}
+export const sharedTabs = () => v2<SharedTabsSnapshot>('/tabs');
+export const saveSharedTabs = (openTabs: { order: string[]; pinned: string[]; activeId: string | null }) =>
+  mutate<SharedTabsSnapshot>('/tabs', { openTabs });
+
 /* ---- Usage limits and pacing (§30–32) ---- */
 
 export const usageLimits = () => v2Optional<{ limits?: UsageLimit[]; usageLimits?: UsageLimit[] }>('/usage/limits');

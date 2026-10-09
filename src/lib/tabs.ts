@@ -25,6 +25,7 @@ export interface TabView {
   attention: Attention;
   running: boolean;
   pinned: boolean;
+  revision?: number;
   projectId?: string | null;
   updated?: number;
   started?: number | null;
@@ -72,8 +73,12 @@ function persist() {
 }
 
 function emit() {
-  for (const listener of listeners) listener();
+  notify();
   persist();
+}
+
+function notify() {
+  for (const listener of listeners) listener();
 }
 
 function commit(patch: Partial<TabsState>) {
@@ -203,6 +208,24 @@ export function adoptServerTabs(server: Partial<TabsState> | null | undefined): 
     activeId: typeof server.activeId === 'string' && order.includes(server.activeId) ? server.activeId : order[0],
   };
   emit();
+}
+
+/** Apply the server's shared working set without echoing it back as a local
+ * mutation. This is used for initial adoption and cross-device polling. */
+export function replaceTabsFromServer(server: Partial<TabsState> | null | undefined): boolean {
+  if (!server || !Array.isArray(server.order)) return false;
+  const order = dedupe(server.order).slice(0, MAX_TABS);
+  const pinned = dedupe(Array.isArray(server.pinned) ? server.pinned : []).filter((id) => order.includes(id));
+  const activeId = typeof server.activeId === 'string' && order.includes(server.activeId) ? server.activeId : null;
+  if (order.length === state.order.length
+    && order.every((id, index) => id === state.order[index])
+    && pinned.length === state.pinned.length
+    && pinned.every((id, index) => id === state.pinned[index])
+    && activeId === state.activeId) return false;
+  state = { order, pinned, activeId };
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* Local copy is optional. */ }
+  notify();
+  return true;
 }
 
 /** Wire persistence to the server for multi-device sync (P2, §6). */
