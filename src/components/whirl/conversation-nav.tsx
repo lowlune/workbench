@@ -79,8 +79,8 @@ export function ConversationNav({ messages, prompts: providedPrompts, viewportRe
           >
             <span
               className={cn(
-                'block h-0.5 rounded-full transition-all duration-200 ease-out',
-                index === active ? 'w-4 bg-foreground' : 'w-2.5 bg-muted-foreground/40 group-hover/nav:w-4 group-hover/nav:bg-muted-foreground',
+                'relative block h-0.5 w-4 overflow-hidden rounded-full after:absolute after:inset-0 after:origin-left after:rounded-full after:transition-[transform,background-color] after:duration-200 after:ease-out',
+                index === active ? 'after:scale-x-100 after:bg-foreground' : 'after:scale-x-[0.625] after:bg-muted-foreground/40 group-hover/nav:after:scale-x-100 group-hover/nav:after:bg-muted-foreground',
               )}
             />
             <span className="raised pointer-events-none absolute top-1/2 left-full ml-2 hidden max-w-xs -translate-y-1/2 truncate rounded-md bg-popover px-2 py-1 text-[11px] text-popover-foreground ring-1 ring-border group-hover/nav:block">

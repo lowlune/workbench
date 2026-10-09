@@ -40,6 +40,7 @@ export function ModelSelect({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [showUnavailable, setShowUnavailable] = useState(false);
+  const [thinkingBusy, setThinkingBusy] = useState(false);
   const [recents, setRecents] = useState<string[]>(() => recentModels(engine));
   const client = useQueryClient();
   const query = useQuery({ queryKey: ['model-offerings'], queryFn: offerings, staleTime: 60_000, refetchInterval: (q) => (q.state.data?.refreshing ? 2000 : false) });
@@ -66,7 +67,18 @@ export function ModelSelect({
     return [...byConnection.entries()];
   }, [filtered]);
 
-  function choose(model: Offering) {
+  async function choose(model: Offering) {
+    if (session && engine === 'pi') {
+      try {
+        const nextLevels = model.thinkingLevels || (model.reasoning ? ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : ['off']);
+        const thinkingLevel = nextLevels.includes(session.thinkingLevel || 'off') ? (session.thinkingLevel || 'off') : 'off';
+        await mutate(`/conversations/${encodeURIComponent(session.id)}`, { model: model.id, thinkingLevel });
+        await client.invalidateQueries({ queryKey: ['session', session.id] });
+      } catch (error) {
+        onToast((error as Error).message, true);
+        return;
+      }
+    }
     rememberModel(engine, model.id);
     setRecents(recentModels(engine));
     onChange(model.id);
@@ -94,7 +106,7 @@ export function ModelSelect({
   function option(model: Offering) {
     const isDefault = defaultId === model.id;
     return (
-      <div key={`${model.engine}:${model.id}`} className="flex items-center rounded-md hover:bg-accent">
+      <div key={`${model.engine}:${model.id}`} className="flex items-center rounded-md hover:bg-accent active:bg-(--accent-pressed)">
         <button
           role="option"
           aria-selected={value === model.id}
@@ -145,7 +157,7 @@ export function ModelSelect({
             type="button"
             aria-label="Choose model"
             className={cn(
-              'inline-flex cursor-pointer items-center gap-1.5 rounded-full transition-colors duration-150 hover:bg-accent',
+              'inline-flex cursor-pointer items-center gap-1.5 rounded-full transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.98]',
               compact
                 ? 'h-7 max-w-52 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground'
                 : 'raised h-8 max-w-72 bg-well px-3 text-[12px] ring-1 ring-border',
@@ -186,7 +198,7 @@ export function ModelSelect({
             {context && (
               <div className="mt-2 flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                  <div className={cn('h-full rounded-full bg-foreground transition-[width] duration-500', context.percent >= 90 && 'bg-destructive')} style={{ width: `${context.limit > 0 ? context.percent : 0}%` }} />
+                  <div className={cn('h-full w-full origin-left rounded-full bg-foreground transition-transform duration-500 ease-out', context.percent >= 90 && 'bg-destructive')} style={{ transform: `scaleX(${context.limit > 0 ? Math.min(1, Math.max(0, context.percent / 100)) : 0})` }} />
                 </div>
                 <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">Context {context.percent}%</span>
               </div>
@@ -234,6 +246,28 @@ export function ModelSelect({
             </div>
           )}
         </div>
+        {session && engine === 'pi' && selected && (selected.thinkingLevels || (selected.reasoning ? ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : ['off'])).length > 1 && (
+          <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+            <label htmlFor={`thinking-${session.id}`} className="shrink-0 text-[11px] text-muted-foreground">Reasoning</label>
+            <select
+              id={`thinking-${session.id}`}
+              aria-label="Reasoning level"
+              value={session.thinkingLevel || 'off'}
+              disabled={thinkingBusy}
+              onChange={(event) => {
+                const thinkingLevel = event.target.value;
+                setThinkingBusy(true);
+                void mutate(`/conversations/${encodeURIComponent(session.id)}`, { thinkingLevel })
+                  .then(() => client.invalidateQueries({ queryKey: ['session', session.id] }))
+                  .catch((error) => onToast((error as Error).message, true))
+                  .finally(() => setThinkingBusy(false));
+              }}
+              className="min-w-0 flex-1 rounded-md bg-background px-2 py-1 text-[11px] disabled:opacity-50"
+            >
+              {(selected.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).map((level) => <option key={level} value={level}>{level === 'max' ? 'Max' : level === 'xhigh' ? 'Extra high' : level[0].toUpperCase() + level.slice(1)}</option>)}
+            </select>
+          </div>
+        )}
         {liveAgent && (
           <p className="border-t border-border px-3 py-2 text-[11px]/4 text-muted-foreground">
             The running turn keeps its model — your choice applies from the next one.

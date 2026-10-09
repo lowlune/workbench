@@ -149,7 +149,7 @@ async function modelsOnce(message) {
   let result;
   try {
     const models = await context.runtime.getAvailable();
-    result = { type: 'models', models: models.map((m) => ({ id: `${m.provider}/${m.id}`, provider: m.provider, name: m.name, contextLimit: m.contextWindow, outputLimit: m.maxTokens, images: m.input?.includes('image'), reasoning: m.reasoning, engine: 'pi', cost: m.cost })) };
+    result = { type: 'models', models: models.map((m) => ({ id: `${m.provider}/${m.id}`, provider: m.provider, name: m.name, contextLimit: m.contextWindow, outputLimit: m.maxTokens, images: m.input?.includes('image'), reasoning: m.reasoning, thinkingLevels: m.reasoning ? ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter((level) => Object.hasOwn(m.thinkingLevelMap || {}, level) && m.thinkingLevelMap[level] !== null) : ['off'], engine: 'pi', cost: m.cost })) };
   } finally {
     await releaseWorkbenchModelRuntime(context);
   }

@@ -112,7 +112,7 @@ export function Sidebar({
           onClick={onOpenSystem}
           aria-expanded={systemOpen}
           title="System performance"
-          className="ml-auto inline-flex cursor-pointer items-center rounded-full px-1.5 py-1 text-[10px] whitespace-nowrap tabular-nums text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="ml-auto inline-flex cursor-pointer items-center rounded-full px-1.5 py-1 text-[10px] whitespace-nowrap tabular-nums text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
         >
           {system?.cpu ? `CPU ${system.cpu.percent}% · RAM ${system.memoryPercent ?? 0}%` : 'System…'}
         </button>
@@ -121,7 +121,7 @@ export function Sidebar({
           onClick={onOpenNotifications}
           aria-label={unreadNotifications ? `${unreadNotifications} unread notifications` : 'Notifications'}
           title="Notifications"
-          className="relative grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="relative grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
         >
           <IconBell size={15} />
           {Boolean(unreadNotifications) && (
@@ -181,7 +181,7 @@ export function Sidebar({
             onClick={() => setFilter(value)}
             aria-pressed={filter === value}
             className={cn(
-              'flex-1 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium capitalize transition-colors duration-100',
+              'flex-1 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium capitalize transition-[color,background-color,scale] duration-100 active:scale-[0.98]',
               filter === value ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
             )}
           >
@@ -270,14 +270,14 @@ export function Sidebar({
           type="button"
           onClick={onToggleTheme}
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          className="grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
         >
           {theme === 'dark' ? <IconSun size={15} /> : <IconMoon size={15} />}
         </button>
         <a
           href="/logout"
           aria-label="Sign out"
-          className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="grid size-7 place-items-center rounded-md text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
         >
           <IconLogout size={15} />
         </a>
@@ -377,7 +377,7 @@ function SidebarRow({
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
       className={cn(
-        'group/row flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] transition-colors duration-100',
+        'group/row flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] transition-[color,background-color,scale] duration-100 active:scale-[0.98]',
         active ? 'bg-accent font-medium text-foreground' : 'text-foreground-soft hover:bg-accent hover:text-foreground',
       )}
     >
@@ -420,7 +420,7 @@ function RunRow({
   const meta = [label, todos.length ? `${done}/${todos.length}` : '', elapsed].filter(Boolean).join(' · ');
 
   return (
-    <div data-session-row={session.id} className={cn('group/row relative flex w-full min-w-0 items-center rounded-md transition-colors duration-100', active ? 'bg-accent' : 'hover:bg-accent')}>
+    <div data-session-row={session.id} className={cn('group/row relative flex w-full min-w-0 items-center rounded-md transition-[color,background-color,scale] duration-100 active:scale-[0.98]', active ? 'bg-accent' : 'hover:bg-accent')}>
       <button
         type="button"
         onClick={() => onOpen(session)}

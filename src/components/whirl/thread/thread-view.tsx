@@ -156,7 +156,7 @@ export function ThreadView({
           type="button"
           onClick={jumpToLatest}
           aria-label="Jump to latest message"
-          className="raised absolute bottom-36 left-1/2 z-10 grid size-9 -translate-x-1/2 cursor-pointer place-items-center rounded-full bg-popover text-foreground ring-1 ring-border transition-[scale,background-color] duration-150 hover:bg-accent active:scale-[0.94]"
+          className="raised absolute bottom-36 left-1/2 z-10 grid size-9 -translate-x-1/2 cursor-pointer place-items-center rounded-full bg-popover text-foreground ring-1 ring-border transition-[scale,background-color] duration-150 hover:bg-accent active:scale-[0.96]"
         >
           <IconArrowDown size={17} />
         </button>

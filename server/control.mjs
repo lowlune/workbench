@@ -346,6 +346,7 @@ async function seedCatalog() {
     outputLimit: model.limit?.output,
     images: model.modalities?.input?.includes('image') || false,
     reasoning: !!model.reasoning,
+    thinkingLevels: Array.isArray(model.thinkingLevels) ? model.thinkingLevels : model.reasoning ? ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : ['off'],
     variants: Object.keys(model.variants || {}),
     cost: model.cost,
   }, 'opencode', auth, {}, Date.now(), true)));
@@ -753,6 +754,8 @@ function startRun(command) {
     try {
       canonical(conversation.directory);
       validateModel(command.model, conversation.engine);
+      const thinkingLevels = modelInfo(command.model, conversation.engine)?.thinkingLevels || ['off'];
+      if (!thinkingLevels.includes(command.thinking_level || conversation.thinking_level || 'off')) throw fail('Selected reasoning level is not supported by this model.');
       const input = decode(command.input, {});
       const attachments = attachmentsFor((input.attachments || []).map((attachment) => attachment.id));
       if (attachments.some((attachment) => attachment.mime.startsWith('image/')) && !modelInfo(command.model, conversation.engine)?.images) {
@@ -779,7 +782,7 @@ function startRun(command) {
          the original text. */
       const prefix = context.trim() ? `Project instructions (AGENTS.md) that apply to this request:\n${context.trim()}\n\n---\n\n` : '';
       const baseText = handoff ? `Previous conversation context (reference only):\n${handoff}\n\nCurrent request:\n${input.text}` : input.text;
-      const runtimeCommand = { ...command, input: JSON.stringify({ ...input, text: `${prefix}${baseText}` }), context, instructions: context };
+      const runtimeCommand = { ...command, reasoning: command.thinking_level || conversation.thinking_level || 'off', input: JSON.stringify({ ...input, text: `${prefix}${baseText}` }), context, instructions: context };
       if (run.cancelled) throw Object.assign(new Error('Run cancelled before dispatch.'), { cancelled: true });
       await runtime.run(runtimeConversation, runtimeCommand, attachments, runtimeHooks(run, command, conversation));
       if (run.cancelled) {
@@ -1287,7 +1290,7 @@ async function routes(req, res) {
     }
     /* No live Pi worker to steer: keep it durable and let the queue run it. */
     const model = validateModel(b.model || c.model || defaultModel(c.engine, c.project_id), c.engine);
-    const command = store.accept(c.id, { text, attachments: [] }, model, c.reasoning, b.clientCommandId || uid());
+    const command = store.accept(c.id, { text, attachments: [] }, model, c.thinking_level || 'off', b.clientCommandId || uid());
     json(res, 202, { steered: false, queued: true, commandId: command.id });
     void tick();
     return;
@@ -1309,6 +1312,7 @@ async function routes(req, res) {
     if (method === 'PATCH') {
       const b = await body(req);
       if (b.model) validateModel(b.model, c.engine);
+      if (b.thinkingLevel !== undefined) { const model = b.model || c.model; const levels = modelInfo(model, c.engine)?.thinkingLevels || ['off']; if (!levels.includes(b.thinkingLevel)) throw fail('Choose a reasoning level supported by this model.'); }
       if ('projectId' in b || 'workspace' in b || 'directory' in b) {
         if (runs.has(c.id) || store.active(c.id) || store.db.prepare("SELECT 1 FROM commands WHERE conversation_id=? AND status='queued'").get(c.id)) throw fail('Finish or remove queued work before changing workspace.', 409);
         if (b.revision !== undefined && b.revision !== c.revision) throw fail('Conversation changed; refresh before changing workspace.', 409);
@@ -1338,6 +1342,7 @@ async function routes(req, res) {
       const session = store.patchConversation(c.id, b, b.revision);
       /* Model switch is durable: old messages keep their own model in `info`,
          new runs use the new model, and a system message records the change. */
+      if (b.thinkingLevel !== undefined && b.thinkingLevel !== c.thinking_level) emitTyped(c.id, null, 'model.changed', { thinkingLevel: b.thinkingLevel, engine: c.engine });
       if (b.model && b.model !== previousModel) {
         const next = modelInfo(b.model, c.engine);
         const previous = modelInfo(previousModel, c.engine);
@@ -1360,11 +1365,14 @@ async function routes(req, res) {
     const attachments = attachmentsFor(b.attachmentIds || []);
     if (text.length > 60000 || (!text && !attachments.length)) throw fail('Write a message or attach a file (maximum 60,000 characters).');
     const model = validateModel(b.model || c.model || defaultModel(c.engine, c.project_id), c.engine);
+    const availableThinking = modelInfo(model, c.engine)?.thinkingLevels || ['off'];
+    const thinkingLevel = b.thinkingLevel || c.thinking_level || 'off';
+    if (!availableThinking.includes(thinkingLevel)) throw fail('Choose a reasoning level supported by this model.', 409);
     if (attachments.some((attachment) => attachment.mime.startsWith('image/')) && !modelInfo(model, c.engine)?.images) throw fail('Select a model that supports images.', 409);
     /* Sending a message is an explicit intent to continue: a queue paused by
        Stop or by a failed/interrupted run must not swallow it silently. */
     if (c.paused) store.patchConversation(c.id, { paused: false });
-    const command = store.accept(c.id, { text, attachments: attachments.map(({ id, name, mime }) => ({ id, name, mime })) }, model, b.reasoning || c.reasoning, b.clientCommandId);
+    const command = store.accept(c.id, { text, attachments: attachments.map(({ id, name, mime }) => ({ id, name, mime })) }, model, thinkingLevel, b.clientCommandId);
     json(res, 202, { commandId: command.id, status: command.status });
     void tick();
     return;

@@ -49,7 +49,7 @@ export function useSessionMenu({
   onOpenAgentsMd?: (session: Session) => void;
   onOpenSettings?: (session: Session) => void;
 }) {
-  const [state, setState] = useState<{ session: Session; x: number; y: number } | null>(null);
+  const [state, setState] = useState<{ session: Session; x: number; y: number; originX: number; originY: number } | null>(null);
   /* The clicked row is lifted above the blurred backdrop so it stays crisp
      while the menu is open. */
   const elevatedRef = useRef<HTMLElement | null>(null);
@@ -85,11 +85,9 @@ export function useSessionMenu({
 
   function openSessionMenuAt(x: number, y: number, session: Session, rowEl?: HTMLElement | null) {
     const el = rowEl || (document.elementFromPoint(x, y)?.closest('[data-session-row]') as HTMLElement | null);
-    setState({
-      session,
-      x: Math.max(8, Math.min(x, window.innerWidth - 240)),
-      y: Math.max(8, Math.min(y, window.innerHeight - 320)),
-    });
+    const left = Math.max(8, Math.min(x, window.innerWidth - 240));
+    const top = Math.max(8, Math.min(y, window.innerHeight - 320));
+    setState({ session, x: left, y: top, originX: x - left, originY: y - top });
     elevate(el || null);
   }
 
@@ -134,8 +132,8 @@ export function useSessionMenu({
         aria-label="Conversation actions"
         onPointerDown={(event) => event.stopPropagation()}
         onContextMenu={(event) => event.preventDefault()}
-        style={{ left: state.x, top: state.y }}
-        className="raised fixed z-[131] w-56 rounded-xl bg-popover p-1 text-[13px] ring-1 ring-border animate-in fade-in zoom-in-95 duration-150"
+        style={{ left: state.x, top: state.y, transformOrigin: `${state.originX}px ${state.originY}px` }}
+        className="raised fixed z-[131] w-56 rounded-xl bg-popover p-1 text-[13px] ring-1 ring-border animate-in fade-in zoom-in-95 ease-out duration-150"
       >
       <MenuItem onClick={() => run(() => onPin(session))} icon={<IconPinFilled size={15} />}>
         {session.pinned ? 'Unpin' : 'Pin'}
@@ -186,7 +184,7 @@ function MenuItem({ icon, children, onClick, danger }: { icon: ReactNode; childr
       type="button"
       role="menuitem"
       onClick={onClick}
-      className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent ${danger ? 'text-destructive hover:bg-destructive/10' : ''}`}
+      className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed) ${danger ? 'text-destructive hover:bg-destructive/10' : ''}`}
     >
       <span className={danger ? '' : 'text-muted-foreground'}>{icon}</span>
       {children}

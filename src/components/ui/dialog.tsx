@@ -26,6 +26,7 @@ function DialogContent({
   children,
   keepMounted,
   dim = true,
+  instant = false,
   backdropClassName,
   ...props
 }: DialogPrimitive.Popup.Props & {
@@ -36,6 +37,8 @@ function DialogContent({
   /* Skip the dimming backdrop for popups that should feel menu-light
      (pair with modal="trap-focus" on the root so page scroll stays free). */
   dim?: boolean
+  /* Keyboard-triggered surfaces such as ⌘K should open without delay. */
+  instant?: boolean
   /* Extra classes for the dimming backdrop — e.g. backdrop-blur-xs for a
      frosted scrim (the external-link gate). */
   backdropClassName?: string
@@ -46,7 +49,8 @@ function DialogContent({
         <DialogPrimitive.Backdrop
           data-slot="dialog-backdrop"
           className={cn(
-            "fixed inset-0 z-50 bg-black/40 duration-150 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+            "fixed inset-0 z-50 bg-black/40",
+            instant ? "duration-0" : "duration-150 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
             backdropClassName,
           )}
         />
@@ -54,7 +58,8 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "raised fixed top-[22vh] left-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 rounded-xl bg-popover p-4 text-popover-foreground ring-1 ring-border duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "raised fixed top-[22vh] left-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 rounded-xl bg-popover p-4 text-popover-foreground ring-1 ring-border outline-none",
+          instant ? "duration-0" : "duration-150 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className,
         )}
         {...props}

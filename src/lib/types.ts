@@ -94,6 +94,7 @@ export interface Session {
   customTitle?: boolean;
   tags?: string[];
   reasoning?: string | null;
+  thinkingLevel?: string | null;
   mode?: 'plan' | 'build';
   paused?: boolean;
   legacy?: boolean;
@@ -124,6 +125,7 @@ export interface Offering extends ModelOption {
   planLabel?: string;
   images?: boolean;
   reasoning?: boolean;
+  thinkingLevels?: string[];
   variants?: string[];
   cost?: ModelCost;
   available?: boolean;

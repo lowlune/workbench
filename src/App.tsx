@@ -18,6 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } f
 import { ApiError, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel } from '@/lib/api';
 import { useConsoleQueries } from '@/lib/use-console-queries';
 import { useSessionRepair } from '@/lib/use-session-repair';
+import { useViewportInsets } from '@/lib/viewport-insets';
 import type { Attachment } from '@/lib/attachments';
 import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, UsagePacing, UsageResponse, WorkbenchEvent } from '@/lib/types';
 import {
@@ -50,6 +51,7 @@ interface ToastMessage {
   id: number;
   text: string;
   error: boolean;
+  leaving?: boolean;
 }
 
 function readRoute(): Route {
@@ -152,6 +154,7 @@ function computeUsageStatus(pacing?: UsagePacing, weekly?: UsageResponse): Usage
 const emptyOverview: Overview = { agents: [], sessions: [], directories: [], system: {} };
 
 export default function App() {
+  useViewportInsets();
   const queryClient = useQueryClient();
   const [route, setRoute] = useState<Route>(readRoute);
   const [previousView, setPreviousView] = useState<Exclude<AppView, 'chat'>>('home');
@@ -259,11 +262,16 @@ export default function App() {
   );
   const unreadNotifications = notificationsQuery.data?.unread || 0;
 
+  const dismissToast = useCallback((id: number) => {
+    setToasts((current) => current.map((toast) => toast.id === id ? { ...toast, leaving: true } : toast));
+    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 260);
+  }, []);
+
   const showToast = useCallback((text: string, error = false) => {
     const id = Date.now() + Math.random();
     setToasts((current) => [...current.slice(-2), { id, text, error }]);
-    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
-  }, []);
+    window.setTimeout(() => dismissToast(id), 4200);
+  }, [dismissToast]);
 
   useEffect(() => { archivedOpenRef.current = archivedOpen; }, [archivedOpen]);
 
@@ -709,6 +717,9 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     try { localStorage.setItem('workbench-theme', theme); } catch { /* Theme still applies for this tab. */ }
+    document.querySelectorAll('meta[name="theme-color"]').forEach((meta) => {
+      meta.setAttribute('content', theme === 'dark' ? '#202020' : '#f3f3f3');
+    });
   }, [theme]);
 
   useEffect(() => {
@@ -954,7 +965,7 @@ export default function App() {
   const projects = bootQuery.data?.projects || [];
 
   return (
-    <div className="flex h-dvh min-h-0 w-full overflow-hidden bg-background text-foreground">
+    <div className="app-frame flex h-dvh min-h-0 w-full overflow-hidden bg-background text-foreground">
       <Sidebar
         view={route.view}
         overview={overview}
@@ -1096,7 +1107,7 @@ export default function App() {
 
           {route.view !== 'chat' && (
             <nav
-              className="absolute inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t border-border bg-(--popover-translucent) px-2 pt-1 pb-[max(4px,env(safe-area-inset-bottom))] backdrop-blur-xl md:hidden"
+              className="mobile-tab-bar absolute inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t border-border bg-(--popover-translucent) px-2 pt-1 pb-[max(4px,env(safe-area-inset-bottom))] backdrop-blur-xl md:hidden"
               aria-label="Mobile navigation"
             >
               {([
@@ -1110,7 +1121,7 @@ export default function App() {
                   onClick={() => navigate(view)}
                   aria-current={route.view === view ? 'page' : undefined}
                   className={cn(
-                    'grid min-h-12 justify-items-center content-center gap-0.5 rounded-md text-[11px]',
+                    'grid min-h-12 justify-items-center content-center gap-0.5 rounded-md text-[11px] transition-[color,background-color,scale] duration-150 active:scale-[0.96]',
                     route.view === view ? 'text-foreground' : 'text-muted-foreground',
                   )}
                 >
@@ -1251,13 +1262,14 @@ export default function App() {
         onOpenSession={(selected) => { setSearchOpen(false); openSession(selected); }}
       />
 
-      <div className="pointer-events-none fixed right-4 bottom-4 z-[100] flex w-[min(20rem,calc(100vw-2rem))] flex-col items-end gap-2" aria-live="polite" aria-relevant="additions text">
+      <div className="pointer-events-none fixed right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] z-[100] flex w-[min(20rem,calc(100vw-2rem))] flex-col items-end gap-2" aria-live="polite" aria-relevant="additions text">
         {toasts.map((toast) => (
           <div
             key={toast.id}
             role={toast.error ? 'alert' : 'status'}
+            data-leaving={toast.leaving ? '' : undefined}
             className={cn(
-              'raised pointer-events-auto w-full truncate rounded-xl bg-popover py-2 pr-3 pl-3 text-sm ring-1 ring-border',
+              'wb-toast raised pointer-events-auto w-full rounded-xl bg-popover py-2 pr-3 pl-3 text-sm ring-1 ring-border line-clamp-2 break-words',
               toast.error ? 'text-destructive' : 'text-popover-foreground',
             )}
           >

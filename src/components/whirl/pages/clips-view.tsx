@@ -65,7 +65,7 @@ export function ClipsView({ onToast }: { onToast: (message: string, isError?: bo
             className="field-text block max-h-52 min-h-20 w-full resize-none overflow-y-auto bg-transparent px-2 py-1.5 outline-none placeholder:text-muted-foreground"
           />
           <div className="flex items-center justify-between gap-2 px-0.5 pb-0.5">
-            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]">
               <IconPaperclip size={14} />
               Image
               <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="sr-only" onChange={(event) => { void onFiles(event.target.files); event.target.value = ''; }} />
@@ -112,7 +112,7 @@ export function ClipsView({ onToast }: { onToast: (message: string, isError?: bo
                             window.setTimeout(() => setCopiedId(undefined), 1400);
                           }).catch(() => onToast('Could not copy the clip.', true));
                         }}
-                        className="grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        className="grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
                       >
                         {copiedId === clip.id ? <IconCheck size={14} /> : <IconCopy size={14} />}
                       </button>

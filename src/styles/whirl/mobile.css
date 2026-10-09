@@ -15,7 +15,7 @@
    so the layout viewport shrinks with the keyboard. On iOS it does not: the
    layout viewport holds its full height, the keyboard is drawn over the
    bottom of it, and a docked composer ends up behind the keys. The inset is
-   measured from visualViewport (components/mobile/viewport-insets.tsx) and
+   measured from visualViewport (lib/viewport-insets.ts) and
    is 0 whenever no keyboard is up, including everywhere on desktop — which
    never reads it anyway, the query below sees to that. */
 @media (hover: none) and (pointer: coarse) {
@@ -73,12 +73,11 @@
      across it should never start selecting label text. Prose, code blocks
      and message bodies are deliberately left out — copying out of a reply
      is a thing people do constantly. */
-  button,
-  [role="button"],
-  [role="menuitem"],
-  [role="tab"],
-  nav,
-  aside {
+  button, a, label, summary, [role="button"], [role="tab"], [role="menuitem"] {
+    touch-action: manipulation;
+  }
+
+  button, [role="button"], [role="menuitem"], [role="tab"], nav, aside {
     -webkit-touch-callout: none;
     user-select: none;
   }

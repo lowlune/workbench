@@ -21,7 +21,7 @@ export function ToolActivity({ tools, onOpenFile }: { tools: MessagePart[]; onOp
   }
   const active = tools.some((part) => ['running', 'pending', 'starting'].includes(String(part.state?.status || '')));
   return (
-    <details className="group/activity w-full min-w-0">
+    <details className="wb-disclosure group/activity w-full min-w-0">
       <summary className="tool-row flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 text-[12.5px] text-muted-foreground marker:hidden [&::-webkit-details-marker]:hidden">
         {active
           ? <IconLoader2 size={13} className="shrink-0 animate-spin" aria-hidden="true" />

@@ -25,7 +25,7 @@ export function ChatRow({
         onClick={() => onOpen(session)}
         onContextMenu={(event) => onContextMenu?.(event, session)}
         className={cn(
-          'flex h-8 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md pr-8 pl-2.5 text-left text-[13.5px]/4 font-medium transition-colors duration-100',
+          'flex h-8 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md pr-8 pl-2.5 text-left text-[13.5px]/4 font-medium transition-[color,background-color,scale] duration-100 active:scale-[0.98]',
           active ? 'bg-accent text-foreground' : 'text-foreground-soft hover:bg-accent hover:text-foreground',
         )}
       >

@@ -114,6 +114,7 @@ export function RunSummary({ session, run, onViewChanges }: {
   const active = ACTIVE.has((run.status || '').toLowerCase());
   const [now, setNow] = useState(() => Date.now());
   const [expired, setExpired] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {
     if (!active) return;
@@ -124,11 +125,15 @@ export function RunSummary({ session, run, onViewChanges }: {
   /* A finished Run reports its outcome once, then the summary yields the
      composer back to the conversation. */
   useEffect(() => {
-    if (active) { setExpired(false); return; }
+    const beginExit = () => {
+      setLeaving(true);
+      window.setTimeout(() => setExpired(true), 160);
+    };
+    if (active) { setExpired(false); setLeaving(false); return; }
     const ended = run.ended || Date.now();
     const remaining = 20_000 - (Date.now() - ended);
-    if (remaining <= 0) { setExpired(true); return; }
-    const timer = window.setTimeout(() => setExpired(true), remaining);
+    if (remaining <= 0) { beginExit(); return; }
+    const timer = window.setTimeout(beginExit, remaining);
     return () => window.clearTimeout(timer);
   }, [active, run.ended, run.id]);
 
@@ -149,8 +154,9 @@ export function RunSummary({ session, run, onViewChanges }: {
   return (
     <div
       role="status"
+      data-leaving={leaving ? '' : undefined}
       className={cn(
-        'mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3.5 py-2 text-[12px] backdrop-blur-xl',
+        'wb-enter mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3.5 py-2 text-[12px] backdrop-blur-xl',
         tone === 'error' && 'text-destructive',
         tone === 'attention' && 'text-amber-700 dark:text-amber-300',
       )}
@@ -188,7 +194,7 @@ export function RunSummary({ session, run, onViewChanges }: {
         <button
           type="button"
           onClick={() => onViewChanges(run.id, active)}
-          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1 font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1 font-medium text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.98]"
         >
           <IconFileDiff size={12} />
           Changes

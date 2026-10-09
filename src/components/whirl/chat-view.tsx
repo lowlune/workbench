@@ -312,7 +312,7 @@ export function ChatView({
           type="button"
           onClick={onBack}
           aria-label="Back"
-          className="raised pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full bg-(--popover-translucent) text-foreground backdrop-blur-sm ring-1 ring-border transition-[scale,background-color] duration-150 hover:bg-accent active:scale-[0.94] md:hidden"
+          className="raised pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full bg-(--popover-translucent) text-foreground backdrop-blur-sm ring-1 ring-border transition-[scale,background-color] duration-150 hover:bg-accent active:scale-[0.96] md:hidden"
         >
           <IconArrowLeft size={16} />
         </button>
@@ -368,7 +368,7 @@ export function ChatView({
         )}
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
-          <div ref={dockRef} className="pointer-events-auto mx-auto w-full max-w-[52rem] px-3 pb-3 md:px-6">
+          <div ref={dockRef} className="pointer-events-auto mx-auto w-full max-w-[52rem] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-6 md:pb-3">
             {session?.activeRun && (
               <RunSummary
                 session={session}
@@ -408,7 +408,7 @@ export function ChatView({
                 {queued.length > 0 && (
                   <div
                     role="status"
-                    className="mb-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2.5 text-[12px] backdrop-blur-xl"
+                    className="wb-enter mb-2 rounded-3xl border border-[var(--well-outline)] bg-(--well-translucent) px-3 py-2.5 text-[12px] backdrop-blur-xl"
                   >
                     <div className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
                       <IconClock size={12} className="shrink-0" />
@@ -518,7 +518,7 @@ export function ChatView({
 function Banner({ tone, children }: { tone: 'destructive' | 'muted'; children: ReactNode }) {
   return (
     <div className={cn(
-      'z-10 flex items-center justify-between gap-3 px-4 py-2 text-[12px] sm:px-6',
+      'wb-enter z-10 flex items-center justify-between gap-3 px-4 py-2 text-[12px] sm:px-6',
       tone === 'destructive'
         ? 'bg-destructive/10 text-destructive'
         : 'bg-well text-muted-foreground',

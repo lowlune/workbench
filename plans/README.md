@@ -122,18 +122,18 @@ Dependencies matter; do them top-to-bottom unless a plan says otherwise.
 
 | # | Plan | Severity | Status |
 | --- | --- | --- | --- |
-| 001 | Shared motion tokens | MEDIUM | TODO |
-| 002 | Toast enter/exit motion | HIGH | TODO |
-| 003 | Command palette opens instantly | HIGH | TODO |
-| 004 | Menu origin + consistency | MEDIUM | TODO |
-| 005 | GPU-only properties | MEDIUM | TODO |
-| 006 | Consistent press feedback | MEDIUM | TODO |
-| 007 | Surface entrances | MEDIUM | TODO |
-| 008 | Mobile-native fixes | HIGH | TODO |
-| 009 | Reduced motion / transparency | MEDIUM | TODO |
-| 010 | Disclosure motion | LOW | TODO |
-| 011 | Dead Whirl CSS audit | LOW | TODO |
-| 012 | Misc polish | LOW | TODO |
+| 001 | Shared motion tokens | MEDIUM | DONE |
+| 002 | Toast enter/exit motion | HIGH | DONE |
+| 003 | Command palette opens instantly | HIGH | DONE |
+| 004 | Menu origin + consistency | MEDIUM | DONE |
+| 005 | GPU-only properties | MEDIUM | DONE |
+| 006 | Consistent press feedback | MEDIUM | DONE |
+| 007 | Surface entrances | MEDIUM | DONE |
+| 008 | Mobile-native fixes | HIGH | DONE |
+| 009 | Reduced motion / transparency | MEDIUM | DONE |
+| 010 | Disclosure motion | LOW | DONE |
+| 011 | Dead Whirl CSS audit | LOW | DONE |
+| 012 | Misc polish | LOW | DONE |
 
 Update a plan's row here to DONE (or note partial) as it lands, and re-stamp
 its `Commit:` line during `improve-animations reconcile`.

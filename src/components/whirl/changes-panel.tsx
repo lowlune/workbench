@@ -208,7 +208,7 @@ export function ChangesPanel({ open, onOpenChange, target, onToast, onChanged }:
                 <button
                   type="button"
                   onClick={() => setWantPatch((value) => !value)}
-                  className="cursor-pointer rounded-full px-3 py-1 text-[12px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                  className="cursor-pointer rounded-full px-3 py-1 text-[12px] font-medium text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
                 >
                   {wantPatch ? 'Hide diff' : 'Show diff'}
                 </button>
@@ -239,7 +239,7 @@ export function ChangesPanel({ open, onOpenChange, target, onToast, onChanged }:
                 <button
                   type="button"
                   onClick={() => setConfirmDiscard(false)}
-                  className="cursor-pointer rounded-full px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                  className="cursor-pointer rounded-full px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
                 >
                   Cancel
                 </button>

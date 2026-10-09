@@ -30,7 +30,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, directory TEXT UNIQUE NOT NULL, model TEXT, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS workspaces(directory TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),git_common TEXT);
       CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, title TEXT NOT NULL, engine TEXT NOT NULL, directory TEXT NOT NULL,
-        project_id TEXT REFERENCES projects(id), native_id TEXT, legacy_id TEXT, model TEXT, reasoning TEXT, mode TEXT NOT NULL DEFAULT 'build',
+        project_id TEXT REFERENCES projects(id), native_id TEXT, legacy_id TEXT, model TEXT, reasoning TEXT, thinking_level TEXT NOT NULL DEFAULT 'off', mode TEXT NOT NULL DEFAULT 'build',
         pinned INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0, paused INTEGER NOT NULL DEFAULT 0,
         revision INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL, updated INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS conversations_recent ON conversations(hidden,pinned,updated DESC,id);
@@ -82,6 +82,7 @@ export class Store {
       ['commands', 'failure_code', 'TEXT'],
       ['commands', 'attempts', 'INTEGER NOT NULL DEFAULT 0'],
       ['commands', 'retry_at', 'INTEGER'],
+      ['commands', 'thinking_level', "TEXT NOT NULL DEFAULT 'off'"],
       ['events', 'kind', 'TEXT'],
       ['events', 'run_id', 'TEXT'],
       ['interactions', 'run_id', 'TEXT'],
@@ -110,6 +111,7 @@ export class Store {
         WHERE status IN ('starting','running','waiting_for_user','waiting_for_permission','interrupting');
       PRAGMA user_version=2;`);
     this.addColumn('notifications', 'delivery', 'TEXT');
+    this.addColumn('conversations', 'thinking_level', "TEXT NOT NULL DEFAULT 'off'");
     this.addColumn('worktrees', 'root_directory', 'TEXT');
     this.db.exec(`UPDATE worktrees SET root_directory=(SELECT directory FROM conversations WHERE id=worktrees.conversation_id) WHERE root_directory IS NULL;`);
   }
@@ -204,7 +206,7 @@ export class Store {
     const attention = interactions.some((item) => item.kind === 'permission') ? 'permission' : interactions.length ? 'waiting' : (active?.attention || 'none');
     const queued = this.db.prepare("SELECT id,input,model,status,created FROM commands WHERE conversation_id=? AND status='queued' ORDER BY created,id").all(row.id);
     return { id:row.id,title:row.title,engine:row.engine,directory:row.directory,projectId:row.project_id,modelPref:row.model,
-      reasoning:row.reasoning,mode:row.mode,pinned:!!row.pinned,hidden:!!row.hidden,paused:!!row.paused,revision:row.revision,
+      reasoning:row.reasoning,thinkingLevel:row.thinking_level||'off',mode:row.mode,pinned:!!row.pinned,hidden:!!row.hidden,paused:!!row.paused,revision:row.revision,
       created:row.created,updated:row.updated,canResume:true,legacy:!!row.legacy_id,attention,
       status:busy ? 'working' : active?.status || 'idle',runStatus: active?.status || 'idle',resumeStatus:busy ? 'working':'idle',
       activeRun: active ? {id:active.id,status:active.status,error:active.error,failureCode:active.failure_code||null,model:active.model,provider:active.provider,engine:active.engine,worktreeId:active.worktree_id,heartbeat:active.heartbeat,todos:decode(active.todos,[])||[],attempts:active.attempts||0,retryAt:active.retry_at||null,started:active.started,ended:active.ended} : null,
@@ -228,7 +230,7 @@ export class Store {
     return this.transaction(()=>{
       const row=this.conversation(id);
       if(revision!==undefined && revision!==row.revision)throw fail('Conversation changed on another device. Refresh and try again.',409);
-      const allowed={title:'title',model:'model',reasoning:'reasoning',pinned:'pinned',hidden:'hidden',projectId:'project_id',directory:'directory',paused:'paused'};
+      const allowed={title:'title',model:'model',reasoning:'reasoning',thinkingLevel:'thinking_level',pinned:'pinned',hidden:'hidden',projectId:'project_id',directory:'directory',paused:'paused'};
       for(const [key,column] of Object.entries(allowed))if(Object.hasOwn(patch,key)){
         const value=['pinned','hidden','paused'].includes(key)?Number(Boolean(patch[key])):patch[key];
         this.db.prepare(`UPDATE conversations SET ${column}=? WHERE id=?`).run(value,id);
@@ -248,7 +250,7 @@ export class Store {
       const count=this.db.prepare("SELECT count(*) AS n FROM commands WHERE conversation_id=? AND status='queued'").get(id).n;
       if(count>=50)throw fail('The queue contains 50 messages. Remove a queued message before adding another.',409);
       const now=Date.now();
-      this.db.prepare('INSERT INTO commands(id,conversation_id,engine,hash,input,model,reasoning,status,created) VALUES (?,?,?,?,?,?,?,?,?)').run(commandId,id,conversation.engine||'opencode',hash,JSON.stringify(input),model,reasoning||null,'queued',now);
+      this.db.prepare('INSERT INTO commands(id,conversation_id,engine,hash,input,model,reasoning,thinking_level,status,created) VALUES (?,?,?,?,?,?,?,?,?,?)').run(commandId,id,conversation.engine||'opencode',hash,JSON.stringify(input),model,reasoning||null,conversation.thinking_level||'off','queued',now);
       const message={id:`user_${commandId}`,created:now,commandId,info:{role:'user'},parts:[{id:`text_${commandId}`,type:'text',text:input.text},...(input.attachments||[]).map(a=>({id:a.id,type:'file',filename:a.name,mime:a.mime,url:`/api/v2/attachments/${a.id}`}))]};
       this.message(id,message,commandId);
       this.db.prepare('UPDATE conversations SET updated=?,revision=revision+1 WHERE id=?').run(now,id);

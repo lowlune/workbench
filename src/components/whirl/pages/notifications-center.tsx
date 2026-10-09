@@ -90,7 +90,7 @@ export function NotificationsCenter({
             type="button"
             disabled={unread === 0 || readAll.isPending}
             onClick={() => readAll.mutate()}
-            className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-40"
           >
             {readAll.isPending ? <IconLoader2 size={12} className="animate-spin" /> : <IconCheck size={12} />}
             Read all
@@ -111,7 +111,7 @@ export function NotificationsCenter({
               type="button"
               onClick={() => openItem(item)}
               className={cn(
-                'flex w-full min-w-0 cursor-pointer items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors duration-75 hover:bg-accent',
+                'flex w-full min-w-0 cursor-pointer items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed)',
                 item.conversationId ? '' : 'cursor-default',
               )}
             >
@@ -185,7 +185,7 @@ function Toggle({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        'mt-1 flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50',
+        'mt-1 flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-left transition-[color,background-color,scale] duration-100 active:scale-[0.98] hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50',
       )}
     >
       <span className="min-w-0 flex-1">
@@ -193,7 +193,7 @@ function Toggle({
         {description && <span className="block text-[10.5px] text-muted-foreground">{description}</span>}
       </span>
       <span className={cn('relative h-4 w-7 shrink-0 rounded-full transition-colors duration-150', checked ? 'bg-primary' : 'bg-muted')}>
-        <span className={cn('absolute top-0.5 size-3 rounded-full bg-background transition-[left] duration-150', checked ? 'left-3.5' : 'left-0.5')} />
+        <span className={cn('absolute top-0.5 left-0.5 size-3 rounded-full bg-background transition-transform duration-150 ease-out', checked ? 'translate-x-3' : 'translate-x-0')} />
       </span>
     </button>
   );

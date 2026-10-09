@@ -43,7 +43,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
 
   if (interaction.kind === 'permission') {
     return (
-      <div className="mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Permission required">
+      <div className="wb-enter mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Permission required">
         <div className="flex items-center gap-2 bg-amber-500/10 px-3.5 py-2 text-[12px] font-medium text-amber-700 dark:text-amber-300">
           <IconAlertTriangleFilled size={14} className="shrink-0" />
           Permission required — the run is paused
@@ -58,7 +58,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
               {busy && <IconLoader2 size={13} className="animate-spin" />}
               Allow
             </button>
-            <button type="button" disabled={busy} onClick={() => void respond({ reply: 'always' })} className="cursor-pointer rounded-full bg-accent px-3.5 py-1.5 text-[13px] font-medium transition-colors duration-150 hover:bg-accent/70 disabled:opacity-40">
+            <button type="button" disabled={busy} onClick={() => void respond({ reply: 'always' })} className="cursor-pointer rounded-full bg-accent px-3.5 py-1.5 text-[13px] font-medium transition-colors duration-150 hover:bg-accent/70 active:bg-(--accent-pressed) disabled:opacity-40">
               Allow for this Run
             </button>
             <button type="button" disabled={busy} onClick={() => void respond({ reply: 'reject' })} className="cursor-pointer rounded-full px-3 py-1.5 text-[13px] font-medium text-destructive transition-colors duration-150 hover:bg-destructive/10 disabled:opacity-40">
@@ -71,7 +71,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
   }
 
   return (
-    <div className="mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Agent question">
+    <div className="wb-enter mb-3 overflow-hidden rounded-xl bg-well shadow-[inset_0_0_0_1px_var(--well-outline)]" role="group" aria-label="Agent question">
       <div className="flex items-center gap-2 bg-(--well-translucent) px-3.5 py-2 text-[12px] font-medium text-foreground">
         <IconHelpCircle size={14} className="shrink-0 text-muted-foreground" />
         The agent is waiting for your answer
@@ -97,7 +97,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
                       'max-w-full cursor-pointer rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-100 disabled:opacity-40',
                       checked
                         ? 'bg-primary/10 text-foreground shadow-[inset_0_0_0_1px_var(--primary)]'
-                        : 'bg-background shadow-[inset_0_0_0_1px_var(--well-outline)] hover:bg-accent',
+                        : 'bg-background shadow-[inset_0_0_0_1px_var(--well-outline)] hover:bg-accent active:bg-(--accent-pressed)',
                     )}
                   >
                     <span className="flex items-center gap-2">
@@ -137,7 +137,7 @@ export function InteractionCard({ interaction, onDone, onError }: { interaction:
             {busy && <IconLoader2 size={13} className="animate-spin" />}
             Send answer
           </button>
-          <button type="button" disabled={busy} onClick={() => void respond({ reject: true })} className="cursor-pointer rounded-full px-3 py-1.5 text-[13px] text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:opacity-40">
+          <button type="button" disabled={busy} onClick={() => void respond({ reject: true })} className="cursor-pointer rounded-full px-3 py-1.5 text-[13px] text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground active:bg-(--accent-pressed) disabled:opacity-40">
             Skip
           </button>
         </div>

@@ -222,6 +222,7 @@
    `.wb-scrollbar` is the bare behaviour for fields (the composer textarea). */
 .wb-scroll {
   scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 .wb-scroll,
 .wb-scrollbar {
@@ -258,4 +259,69 @@
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
   text-decoration-color: color-mix(in oklab, var(--foreground) 38%, transparent);
+}
+
+
+/* Toasts enter from and leave toward the bottom edge. Transitions retarget
+   cleanly when several feedback messages arrive in quick succession. */
+.wb-toast {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity var(--duration-toast, 400ms) ease, transform var(--duration-toast, 400ms) ease;
+}
+@starting-style {
+  .wb-toast { opacity: 0; transform: translateY(100%); }
+}
+.wb-toast[data-leaving] {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 250ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)), transform 250ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-toast { transition: opacity 200ms ease; transform: none; }
+  @starting-style { .wb-toast { transform: none; } }
+  .wb-toast[data-leaving] { transition: opacity 200ms ease; transform: none; }
+}
+
+/* A transient surface mounts with a short fade and lift; no JS or keyframes. */
+.wb-enter {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 200ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)), transform 200ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+@starting-style {
+  .wb-enter { opacity: 0; transform: translateY(6px); }
+}
+.wb-enter[data-leaving] {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 150ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)), transform 150ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-enter { transition: opacity 200ms ease; transform: none; }
+  @starting-style { .wb-enter { transform: none; } }
+  .wb-enter[data-leaving] { transition: opacity 150ms ease; transform: none; }
+}
+
+/* Progressive enhancement for native tool-call disclosures. */
+.wb-disclosure { interpolate-size: allow-keywords; }
+.wb-disclosure::details-content {
+  block-size: 0;
+  overflow: clip;
+  opacity: 0;
+  transition: block-size 200ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)), opacity 200ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)), content-visibility 200ms allow-discrete;
+}
+.wb-disclosure[open]::details-content { block-size: auto; opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .wb-disclosure::details-content { transition: opacity 150ms ease; }
+}
+
+@keyframes loading-ui-dots-ring-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.65); }
+  12.5% { opacity: 1; transform: scale(1); }
+  25% { opacity: 0.75; transform: scale(0.85); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading-ui-dots-ring-dot { animation: none !important; opacity: 0.6; }
 }

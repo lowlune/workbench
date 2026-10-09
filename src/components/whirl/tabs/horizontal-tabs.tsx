@@ -32,7 +32,7 @@ export function HorizontalTabs({
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ id: string; position: 'before' | 'after' } | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; originX: number; originY: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const activeTab = tabs.find((tab) => tab.id === activeId);
 
@@ -91,10 +91,9 @@ export function HorizontalTabs({
   }
 
   function openMenuAt(x: number, y: number) {
-    setMenu({
-      x: Math.max(8, Math.min(x, window.innerWidth - 200)),
-      y: Math.max(8, Math.min(y, window.innerHeight - 160)),
-    });
+    const left = Math.max(8, Math.min(x, window.innerWidth - 200));
+    const top = Math.max(8, Math.min(y, window.innerHeight - 160));
+    setMenu({ x: left, y: top, originX: x - left, originY: y - top });
   }
 
   return (
@@ -132,7 +131,7 @@ export function HorizontalTabs({
               onDragEnd={() => { setDragId(null); setDrop(null); }}
               onContextMenu={(event) => { event.preventDefault(); onContextMenu?.(event, tab.id); }}
               className={cn(
-                'group/tab relative flex shrink-0 items-center rounded-md transition-colors duration-100',
+                'group/tab relative flex shrink-0 items-center rounded-md transition-[color,background-color,scale] duration-100 active:scale-[0.98]',
                 active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
                 dragId === tab.id && 'opacity-40',
                 drop?.id === tab.id && (drop.position === 'before' ? 'shadow-[inset_2px_0_0_0_var(--primary)]' : 'shadow-[inset_-2px_0_0_0_var(--primary)]'),
@@ -180,7 +179,7 @@ export function HorizontalTabs({
         onClick={onNew}
         aria-label="New chat"
         title="New chat"
-        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
       >
         <IconPlus size={15} stroke={2.4} />
       </button>
@@ -192,7 +191,7 @@ export function HorizontalTabs({
         }}
         aria-label="Tab options"
         title="Tab options"
-        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
       >
         <IconDots size={15} />
       </button>
@@ -203,8 +202,8 @@ export function HorizontalTabs({
           <div
             role="menu"
             aria-label="Tab options"
-            className="raised fixed z-[131] w-48 rounded-xl bg-popover p-1 text-[13px] ring-1 ring-border"
-            style={{ left: menu.x, top: menu.y }}
+            className="raised fixed z-[131] w-48 rounded-xl bg-popover p-1 text-[13px] ring-1 ring-border animate-in fade-in zoom-in-95 ease-out duration-150"
+            style={{ left: menu.x, top: menu.y, transformOrigin: `${menu.originX}px ${menu.originY}px` }}
           >
             <TabMenuItem icon={<IconPlus size={15} />} onClick={() => { setMenu(null); onNew(); }}>New chat</TabMenuItem>
             {activeId && (
@@ -230,7 +229,7 @@ function TabMenuItem({ icon, children, onClick, danger }: { icon: ReactNode; chi
       role="menuitem"
       onClick={onClick}
       className={cn(
-        'flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent',
+        'flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed)',
         danger && 'text-destructive hover:bg-destructive/10',
       )}
     >

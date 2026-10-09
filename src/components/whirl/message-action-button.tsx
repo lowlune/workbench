@@ -22,7 +22,7 @@ export function MessageActionButton({
             type="button"
             aria-label={label}
             onClick={onClick}
-            className="grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-black/[0.05] hover:text-foreground dark:hover:bg-white/[0.06]"
+            className="grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-black/[0.05] active:scale-[0.96] hover:text-foreground dark:hover:bg-white/[0.06]"
           >
             {children}
           </button>

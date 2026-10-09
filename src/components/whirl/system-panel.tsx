@@ -38,7 +38,7 @@ export function SystemPanel({
           type="button"
           aria-label="Close system panel"
           onClick={() => onOpenChange(false)}
-          className="absolute top-3 right-3 grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+          className="absolute top-3 right-3 grid size-7 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]"
         >
           <IconX size={15} />
         </button>
@@ -115,8 +115,8 @@ function Gauge({ label, percent, detail }: { label: string; percent: number; det
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
         <div
-          className={cn('h-full rounded-full bg-foreground transition-[width] duration-500', percent >= 90 && 'bg-destructive')}
-          style={{ width: `${Math.min(100, percent)}%` }}
+          className={cn('h-full w-full origin-left rounded-full bg-foreground transition-transform duration-500 ease-out', percent >= 90 && 'bg-destructive')}
+          style={{ transform: `scaleX(${Math.min(1, Math.max(0, percent / 100))})` }}
         />
       </div>
       {detail && <p className="mt-1.5 truncate text-[11px] text-muted-foreground">{detail}</p>}

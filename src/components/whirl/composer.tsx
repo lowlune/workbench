@@ -162,7 +162,7 @@ export function Composer({
     >
       <div className="relative p-2">
         {attachments.length > 0 && (
-          <div className="mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached files">
+          <div className="wb-enter mb-1 flex flex-wrap gap-2 px-1 pt-1" aria-label="Attached files">
             {attachments.map((attachment, index) => {
               const isImage = Boolean(attachment.mime?.startsWith('image/'));
               return (
@@ -231,7 +231,7 @@ export function Composer({
                   type="button"
                   aria-label="Add attachment"
                   disabled={disabled || processing}
-                  className="grid size-8 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.92] disabled:pointer-events-none disabled:opacity-40"
+                  className="grid size-8 cursor-pointer place-items-center rounded-full text-muted-foreground transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-40"
                 />
               }
             >
@@ -251,7 +251,7 @@ export function Composer({
               type="button"
               onClick={onStop}
               aria-label="Stop generating"
-              className="grid size-9 cursor-pointer place-items-center rounded-full bg-well text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.94]"
+              className="grid size-9 cursor-pointer place-items-center rounded-full bg-well text-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[background-color,scale] duration-150 hover:bg-accent active:scale-[0.96]"
             >
               <IconPlayerStopFilled size={15} />
             </button>
@@ -262,7 +262,7 @@ export function Composer({
               disabled={!canSend}
               aria-label={sending || disabled ? 'Sending message' : 'Send message'}
               title={sendBlocked ? 'Review the agent output before sending' : undefined}
-              className="grid size-9 cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,scale,opacity] duration-150 hover:bg-(--primary-hover) active:scale-[0.94] disabled:pointer-events-none disabled:opacity-40"
+              className="grid size-9 cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,scale,opacity] duration-150 hover:bg-(--primary-hover) active:scale-[0.96] disabled:pointer-events-none disabled:opacity-40"
             >
               {sending || disabled ? <IconLoader2 size={16} className="animate-spin" /> : <IconArrowUp size={17} stroke={2.4} />}
             </button>
@@ -278,7 +278,7 @@ function MenuItem({ icon, label, onClick }: { icon: ReactNode; label: string; on
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors duration-100 hover:bg-accent"
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors duration-100 hover:bg-accent active:bg-(--accent-pressed)"
     >
       <span className="text-muted-foreground">{icon}</span>
       {label}

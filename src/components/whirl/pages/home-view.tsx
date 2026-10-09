@@ -186,7 +186,7 @@ function SectionHead({ title }: { title: string }) {
 }
 
 const CHIP_CLASS =
-  'inline-flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-full bg-well px-2.5 text-[11px] text-muted-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-colors duration-150 hover:bg-accent hover:text-foreground';
+  'inline-flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-full bg-well px-2.5 text-[11px] text-muted-foreground shadow-[inset_0_0_0_1px_var(--well-outline)] transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]';
 
 /* The project the task will run in — a chip, not a dialog step. */
 function ProjectChip({
@@ -216,7 +216,7 @@ function ProjectChip({
             key={item.directory}
             type="button"
             onClick={() => onChange(item.directory)}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
+            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed)"
           >
             <IconFolder size={14} className="shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
@@ -246,7 +246,7 @@ function KindChip({ value, onChange }: { value: 'opencode' | 'pi'; onChange: (ki
             key={option}
             type="button"
             onClick={() => onChange(option)}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent"
+            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed)"
           >
             <span className="min-w-0 flex-1">{option === 'pi' ? 'Pi' : 'OpenCode'}</span>
             {value === option && <IconCheck size={14} className="shrink-0" />}

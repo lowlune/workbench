@@ -29,7 +29,7 @@ export function WorkspaceMenu({
             type="button"
             title={`Workspace: ${current?.directory || directory || 'General'}`}
             className={cn(
-              'inline-flex h-7 max-w-44 cursor-pointer items-center gap-1.5 rounded-full px-2 text-[11px] font-medium transition-colors duration-150 hover:bg-accent hover:text-foreground',
+              'inline-flex h-7 max-w-44 cursor-pointer items-center gap-1.5 rounded-full px-2 text-[11px] font-medium transition-[color,background-color,scale] duration-150 hover:bg-accent hover:text-foreground active:scale-[0.96]',
               current ? 'text-muted-foreground' : 'text-muted-foreground',
             )}
           >
@@ -90,7 +90,7 @@ function WorkspaceRow({
     <button
       type="button"
       onClick={onSelect}
-      className="flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors duration-75 hover:bg-accent"
+      className="flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors duration-75 hover:bg-accent active:bg-(--accent-pressed)"
     >
       <span className="shrink-0 text-muted-foreground">{icon}</span>
       <span className="min-w-0 flex-1">
