@@ -1,12 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconClipboardText, IconClock, IconHome, IconLoader2 } from '@tabler/icons-react';
+import { IconClipboardText, IconClock, IconLoader2, IconPlus } from '@tabler/icons-react';
 import { AgentsMdDialog } from '@/components/whirl/agents-md-dialog';
 import type { ChangesTarget } from '@/components/whirl/changes-panel';
 import { ChatView } from '@/components/whirl/chat-view';
 import { ClipsView } from '@/components/whirl/pages/clips-view';
 import { HistoryView } from '@/components/whirl/pages/history-view';
-import { HomeView } from '@/components/whirl/pages/home-view';
 import { NotificationsCenter } from '@/components/whirl/pages/notifications-center';
 import { RenameDialog } from '@/components/whirl/rename-dialog';
 import { SearchPalette } from '@/components/whirl/search-palette';
@@ -15,12 +14,13 @@ import { HorizontalTabs } from '@/components/whirl/tabs/horizontal-tabs';
 import { useTabsShortcuts } from '@/components/whirl/tabs/use-tabs-shortcuts';
 import { Sidebar, type AppView } from '@/components/whirl/sidebar';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
-import { ApiError, getSession, projectIdForDirectory, regenerateSessionTitle, setSessionMeta, setSessionModel, suggestSessionTitle } from '@/lib/api';
+import { ApiError, getSession, regenerateSessionTitle, setSessionMeta, setSessionModel, suggestSessionTitle } from '@/lib/api';
 import { useConsoleQueries } from '@/lib/use-console-queries';
 import { useSessionRepair } from '@/lib/use-session-repair';
 import { useViewportInsets } from '@/lib/viewport-insets';
 import type { Attachment } from '@/lib/attachments';
-import type { Agent, Attention, Message, MessagePart, Overview, QueuedMessage, Session, WorkbenchEvent } from '@/lib/types';
+import { GENERAL_WORKSPACE_VALUE, makeNewChatPayload, preferredNewChatWorkspace } from '@/lib/new-chat-policy.mjs';
+import type { Agent, Attention, Engine, Message, MessagePart, Overview, QueuedMessage, Session, WorkbenchEvent } from '@/lib/types';
 import {
   ACTIVE_RUN_STATES, agentInstructionFiles, attentionOf,
   isRunningSession, isTerminalRunState, mutate, saveSharedTabs,
@@ -134,14 +134,13 @@ function patchToolPart(session: Session, toolCallId: string, patch: Partial<NonN
 }
 
 const emptyOverview: Overview = { agents: [], sessions: [], directories: [], system: {} };
-
 export default function App() {
   useViewportInsets();
   const queryClient = useQueryClient();
   const [route, setRoute] = useState<Route>(readRoute);
-  const [previousView, setPreviousView] = useState<Exclude<AppView, 'chat'>>('home');
+  const [previousView, setPreviousView] = useState<Exclude<AppView, 'chat'>>('history');
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
-  const [taskFocusSignal, setTaskFocusSignal] = useState(0);
+  const creatingNewChatRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -153,6 +152,12 @@ export default function App() {
   const [agentsTarget, setAgentsTarget] = useState<Session | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [maxRunsDraft, setMaxRunsDraft] = useState('2');
+  const [defaultEngineDraft, setDefaultEngineDraft] = useState<Engine>('pi');
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatEngine, setNewChatEngine] = useState<Engine>('pi');
+  const [newChatWorkspace, setNewChatWorkspace] = useState('');
+  const [creatingNewChat, setCreatingNewChat] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const [sendingSessionId, setSendingSessionId] = useState<string>();
@@ -164,6 +169,9 @@ export default function App() {
   const { overviewQuery, systemQuery, bootQuery, sharedTabsQuery,
     notificationsQuery, archivedQuery, healthQuery } = useConsoleQueries({ settingsOpen, archivedOpen });
   const overview = overviewQuery.data;
+  const engineOptions: Engine[] = bootQuery.data?.engines?.length
+    ? bootQuery.data.engines
+    : ['pi', 'opencode'];
 
   const agent = overview?.agents.find((item) => item.sessionId === route.sessionId);
   const liveSessionId = route.sessionId;
@@ -503,7 +511,7 @@ export default function App() {
   }, [route.view]);
 
   const openSession = useCallback((selected: Session) => {
-    if (route.view !== 'chat') setPreviousView(route.view);
+    if (route.view !== 'chat') setPreviousView(route.view === 'home' ? 'history' : route.view);
     const sessionId = selected.id;
     history.pushState({}, '', hashFor({ view: 'chat', sessionId }));
     setRoute({ view: 'chat', sessionId });
@@ -520,10 +528,43 @@ export default function App() {
   }, [overview, openSession]);
 
   const openNewTask = useCallback(() => {
-    setDrafts((current) => ({ ...current, 'new-task': { text: '', attachments: [] } }));
-    navigate('home');
-    setTaskFocusSignal((signal) => signal + 1);
-  }, [navigate]);
+    if (creatingNewChatRef.current) return;
+    const directories = overview?.directories || [];
+    let lastDirectory: string | null = null;
+    try { lastDirectory = localStorage.getItem('workbench-last-directory'); } catch { /* Preference is optional. */ }
+    const preferred = preferredNewChatWorkspace(directories, projectFilter, activeSession?.directory, lastDirectory);
+    setNewChatEngine(bootQuery.data?.defaultEngine || 'pi');
+    setNewChatWorkspace(preferred || (overviewQuery.isSuccess && directories.length === 0 ? GENERAL_WORKSPACE_VALUE : ''));
+    setNewChatOpen(true);
+  }, [overview?.directories, overviewQuery.isSuccess, projectFilter, activeSession?.directory, bootQuery.data?.defaultEngine]);
+
+  async function createNewChat() {
+    if (creatingNewChatRef.current) return;
+    if (!newChatWorkspace) {
+      showToast('Choose a workspace before creating the chat.', true);
+      return;
+    }
+    creatingNewChatRef.current = true;
+    setCreatingNewChat(true);
+    try {
+      const directory = newChatWorkspace === GENERAL_WORKSPACE_VALUE ? '' : newChatWorkspace;
+      const created = await mutate<{ session: Session }>('/conversations', makeNewChatPayload(newChatEngine, newChatWorkspace));
+      const fresh = { ...created.session, messages: [] };
+      setDrafts((current) => ({ ...current, [fresh.id]: { text: '', attachments: [] } }));
+      queryClient.setQueryData(['session', fresh.id], { session: fresh });
+      if (directory) {
+        try { localStorage.setItem('workbench-last-directory', directory); } catch { /* Preference is optional. */ }
+      }
+      setNewChatOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ['overview'] });
+      openSession(fresh);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not open a new chat.', true);
+    } finally {
+      creatingNewChatRef.current = false;
+      setCreatingNewChat(false);
+    }
+  }
 
   async function archiveSession(target: Session, archived: boolean) {
     try {
@@ -626,6 +667,20 @@ export default function App() {
     if (activeId && (route.view !== 'chat' || route.sessionId !== activeId)) openConversationById(activeId);
     else if (!activeId && route.view === 'chat') navigate('home', undefined, true);
   }, [sharedTabsQuery.data, route.view, route.sessionId, openConversationById, navigate]);
+
+  /* There is no Home dashboard anymore. The root/now route resolves to the
+     shared active tab, or creates a blank chat when the working set is empty. */
+  const homeStartRef = useRef(false);
+  useEffect(() => {
+    if (route.view !== 'home') { homeStartRef.current = false; return; }
+    if (!sharedTabsQuery.isFetched || !tabsReadyRef.current) return;
+    if (sharedTabsQuery.data?.openTabs?.activeId) return; // shared-tab sync opens it
+    if (tabs.activeId) { openConversationById(tabs.activeId); return; }
+    if (tabs.order.length) { openConversationById(tabs.order.at(-1)!); return; }
+    if (homeStartRef.current) return;
+    homeStartRef.current = true;
+    void openNewTask();
+  }, [route.view, sharedTabsQuery.isFetched, sharedTabsQuery.data?.openTabs?.activeId, tabs.activeId, tabs.order, openConversationById, openNewTask]);
 
   /* The route stays the source of truth for the active tab. */
   useEffect(() => {
@@ -785,47 +840,6 @@ export default function App() {
     } finally { setSendingSessionId(undefined); }
   }
 
-  async function startTask({ directory, kind }: { directory: string; kind: 'opencode' | 'pi' }) {
-    const currentDraft = drafts['new-task'] || { text: '', attachments: [] };
-    const text = currentDraft.text.trim();
-    if (!directory) {
-      showToast('Choose a project for the task first.', true);
-      return;
-    }
-    if (!text) {
-      showToast('Describe the task so your agent has something to start with.', true);
-      return;
-    }
-    setSendingSessionId('new-task');
-    try {
-      const projectId = projectIdForDirectory(directory);
-      const id = `chat_${crypto.randomUUID()}`;
-      /* No model from the client: the control plane resolves the harness's
-         current default, so a just-changed default always wins over a stale
-         bootstrap copy. */
-      const created = await mutate<{ session: Session }>('/conversations', {
-        id,
-        title: text.slice(0, 80),
-        engine: kind,
-        projectId,
-        mode: 'build',
-      });
-      await mutate(`/conversations/${id}/commands`, {
-        clientCommandId: crypto.randomUUID(),
-        text,
-        attachmentIds: attachmentIds(currentDraft.attachments),
-      });
-      try { localStorage.setItem('workbench-last-directory', directory); } catch { /* Preference is optional. */ }
-      setDrafts((current) => ({ ...current, 'new-task': { text: '', attachments: [] } }));
-      queryClient.setQueryData(['session', id], { session: { ...created.session, messages: [] } });
-      await queryClient.invalidateQueries({ queryKey: ['overview'] });
-      showToast('Task started.');
-      openSession({ ...created.session, messages: [] });
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not start the task.', true);
-    } finally { setSendingSessionId(undefined); }
-  }
-
   async function stopAgent(selectedAgent?: Agent) {
     const sessionId = selectedAgent?.sessionId || route.sessionId;
     if (!sessionId) return;
@@ -960,19 +974,26 @@ export default function App() {
 
   function openSettingsForSession() {
     setMaxRunsDraft(String(maxRuns));
+    setDefaultEngineDraft(bootQuery.data?.defaultEngine || 'pi');
     setSettingsOpen(true);
   }
 
-  async function applyMaxRuns() {
+  async function applySettings() {
+    if (savingSettings) return;
     const value = Math.max(1, Math.min(16, Math.round(Number(maxRunsDraft) || 1)));
+    setSavingSettings(true);
     try {
-      await saveSettings({ maxRuns: value });
-      await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
-      await queryClient.invalidateQueries({ queryKey: ['health'] });
-      showToast(`Concurrency limit set to ${value}.`);
+      await saveSettings({ maxRuns: value, defaultEngine: defaultEngineDraft });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['bootstrap'] }),
+        queryClient.invalidateQueries({ queryKey: ['health'] }),
+      ]);
+      showToast(`Settings saved. New chats will use ${defaultEngineDraft === 'pi' ? 'Pi' : 'OpenCode'} by default.`);
       setSettingsOpen(false);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not save the concurrency limit.', true);
+      showToast(error instanceof Error ? error.message : 'Could not save settings.', true);
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -1110,26 +1131,11 @@ export default function App() {
               <UsageView projects={projects} onToast={showToast} />
             </Suspense>
           ) : (
-            <HomeView
-              overview={overview || emptyOverview}
-              draft={draft.text}
-              attachments={draft.attachments}
-              sending={Boolean(sendingSessionId)}
-              onDraftChange={(text) => updateDraft({ text })}
-              onAttachmentsChange={(attachments) => updateDraft({ attachments })}
-              onStart={startTask}
-              defaultEngine={bootQuery.data?.defaultEngine || 'pi'}
-              defaults={bootQuery.data?.defaults}
-              onDefaultEngine={(engine) => { void mutate('/settings', { defaultEngine: engine }).then(() => queryClient.invalidateQueries({ queryKey: ['bootstrap'] })); }}
-              focusSignal={taskFocusSignal}
-              onNewTask={openNewTask}
-              onOpenSession={openSession}
-              onOpenAgent={openAgentChat}
-              onHistory={() => navigate('history')}
-              onToast={showToast}
-              onContextMenu={openSessionMenu}
-              onMenuAt={openSessionMenuAt}
-            />
+            <div className="grid h-full place-items-center text-muted-foreground" role="status" aria-live="polite">
+              {sendingSessionId === 'new-task' ? <><IconLoader2 size={18} className="animate-spin" /><span className="sr-only">Opening a new chat…</span></> : (
+                <button type="button" onClick={() => void openNewTask()} className="rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground hover:bg-(--primary-hover)">Open a new chat</button>
+              )}
+            </div>
           )}
 
           {route.view !== 'chat' && (
@@ -1138,15 +1144,15 @@ export default function App() {
               aria-label="Mobile navigation"
             >
               {([
-                ['home', 'Home', IconHome],
                 ['history', 'History', IconClock],
                 ['clips', 'Clips', IconClipboardText],
+                ['new', 'New chat', IconPlus],
               ] as const).map(([view, label, Icon]) => (
                 <button
                   key={view}
                   type="button"
-                  onClick={() => navigate(view)}
-                  aria-current={route.view === view ? 'page' : undefined}
+                  onClick={() => view === 'new' ? void openNewTask() : navigate(view)}
+                  aria-current={view !== 'new' && route.view === view ? 'page' : undefined}
                   className={cn(
                     'grid min-h-12 justify-items-center content-center gap-0.5 rounded-md text-[11px] transition-[color,background-color,scale] duration-150 active:scale-[0.96]',
                     route.view === view ? 'text-foreground' : 'text-muted-foreground',
@@ -1199,13 +1205,89 @@ export default function App() {
           onToast={showToast}
         />
       )}
+      {newChatOpen && (
+        <Dialog open onOpenChange={(open) => { if (!creatingNewChat) setNewChatOpen(open); }}>
+          <DialogContent className="max-w-md rounded-xl">
+            <form
+              className="space-y-4"
+              onSubmit={(event) => { event.preventDefault(); void createNewChat(); }}
+            >
+              <div>
+                <DialogTitle>New chat</DialogTitle>
+                <DialogDescription className="mt-1">
+                  Choose the engine and workspace before opening the conversation.
+                </DialogDescription>
+              </div>
+              <div>
+                <label htmlFor="wb-new-chat-engine" className="text-[12px] font-medium text-muted-foreground">Engine</label>
+                <select
+                  id="wb-new-chat-engine"
+                  value={newChatEngine}
+                  disabled={creatingNewChat}
+                  onChange={(event) => setNewChatEngine(event.target.value as Engine)}
+                  className="mt-1.5 w-full rounded-md bg-well px-3 py-2 text-[13px] shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {engineOptions.map((engine) => <option key={engine} value={engine}>{engine === 'pi' ? 'Pi' : 'OpenCode'}</option>)}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="wb-new-chat-workspace" className="text-[12px] font-medium text-muted-foreground">Workspace</label>
+                <select
+                  id="wb-new-chat-workspace"
+                  required
+                  value={newChatWorkspace}
+                  disabled={creatingNewChat}
+                  onChange={(event) => setNewChatWorkspace(event.target.value)}
+                  className="mt-1.5 w-full rounded-md bg-well px-3 py-2 text-[13px] shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="">Choose a workspace…</option>
+                  <option value={GENERAL_WORKSPACE_VALUE}>General (no project)</option>
+                  {(overview?.directories || []).map((item) => (
+                    <option key={item.directory} value={item.directory}>{item.name} — {item.directory}</option>
+                  ))}
+                </select>
+              </div>
+              <DialogFooter>
+                <button
+                  type="button"
+                  disabled={creatingNewChat}
+                  onClick={() => setNewChatOpen(false)}
+                  className="cursor-pointer rounded-full px-3.5 py-2 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingNewChat || !newChatWorkspace}
+                  className="cursor-pointer rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {creatingNewChat ? 'Creating…' : 'Create chat'}
+                </button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
       {settingsOpen && (
-        <Dialog open onOpenChange={(open) => { if (!open) setSettingsOpen(false); }}>
-          <DialogContent className="top-[24vh] max-w-sm rounded-xl">
-            <DialogTitle>Concurrency & queue</DialogTitle>
+        <Dialog open onOpenChange={(open) => { if (!open && !savingSettings) setSettingsOpen(false); }}>
+          <DialogContent className="top-[18vh] max-w-sm rounded-xl">
+            <DialogTitle>Settings</DialogTitle>
             <DialogDescription>
-              How many Runs may execute at once. Extra Runs wait in the queue. Currently {activeRuns} running · {queuedRuns} queued.
+              Choose the default engine for new chats and set the concurrent run limit. Currently {activeRuns} running · {queuedRuns} queued.
             </DialogDescription>
+            <div className="mt-4">
+              <label htmlFor="wb-default-engine" className="text-[12px] font-medium text-muted-foreground">Default engine for new chats</label>
+              <select
+                id="wb-default-engine"
+                value={defaultEngineDraft}
+                disabled={savingSettings}
+                onChange={(event) => setDefaultEngineDraft(event.target.value as Engine)}
+                className="mt-1.5 w-full rounded-md bg-well px-3 py-2 text-[13px] shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="pi">Pi</option>
+                <option value="opencode">OpenCode</option>
+              </select>
+            </div>
             <div className="mt-4">
               <label htmlFor="wb-max-runs" className="text-[12px] font-medium text-muted-foreground">Maximum concurrent Runs</label>
               <input
@@ -1214,6 +1296,7 @@ export default function App() {
                 min={1}
                 max={16}
                 value={maxRunsDraft}
+                disabled={savingSettings}
                 onChange={(event) => setMaxRunsDraft(event.target.value)}
                 className="mt-1.5 w-full rounded-md bg-well px-3 py-2 text-[13px] tabular-nums shadow-[inset_0_0_0_1px_var(--well-outline)] outline-none"
               />
@@ -1222,17 +1305,19 @@ export default function App() {
             <DialogFooter>
               <button
                 type="button"
+                disabled={savingSettings}
                 onClick={() => setSettingsOpen(false)}
-                className="cursor-pointer rounded-full px-3.5 py-2 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                className="cursor-pointer rounded-full px-3.5 py-2 text-[13px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={() => void applyMaxRuns()}
-                className="cursor-pointer rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96]"
+                disabled={savingSettings}
+                onClick={() => void applySettings()}
+                className="cursor-pointer rounded-full bg-primary px-3.5 py-2 text-[13px] font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-(--primary-hover) active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Save
+                {savingSettings ? 'Saving…' : 'Save settings'}
               </button>
             </DialogFooter>
           </DialogContent>

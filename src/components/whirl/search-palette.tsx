@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { IconClipboardText, IconClock, IconHome, IconPlus, IconSearch } from '@tabler/icons-react';
+import { IconClipboardText, IconClock, IconPlus, IconSearch } from '@tabler/icons-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import type { AppView } from '@/components/whirl/sidebar';
 import type { Overview, Session } from '@/lib/types';
 import { cn, shortDirectory } from '@/lib/utils';
 
 type Item =
-  | { kind: 'action'; id: string; label: string; hint?: string; Icon: typeof IconHome; run: () => void }
+  | { kind: 'action'; id: string; label: string; hint?: string; Icon: typeof IconPlus; run: () => void }
   | { kind: 'session'; session: Session };
 
 export function SearchPalette({
@@ -39,10 +39,9 @@ export function SearchPalette({
   const items = useMemo<Item[]>(() => {
     const needle = query.trim().toLowerCase();
     const actions = ([
-      { kind: 'action', id: 'home', label: 'Go home', Icon: IconHome, run: () => onNavigate('home') },
       { kind: 'action', id: 'history', label: 'Open history', Icon: IconClock, run: () => onNavigate('history') },
       { kind: 'action', id: 'clips', label: 'Open clipboard', Icon: IconClipboardText, run: () => onNavigate('clips') },
-      { kind: 'action', id: 'new', label: 'Start a new task', hint: '⌘⇧N', Icon: IconPlus, run: onNewTask },
+      { kind: 'action', id: 'new', label: 'New blank chat', hint: '⌘⇧N', Icon: IconPlus, run: onNewTask },
     ] satisfies Item[]).filter((item) => !needle || item.label.toLowerCase().includes(needle));
     const sessions: Item[] = (overview?.sessions || [])
       .filter((session) => !needle

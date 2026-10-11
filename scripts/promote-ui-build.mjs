@@ -2,7 +2,8 @@ import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(process.argv[2] || defaultRoot);
 const publicRoot = path.resolve(root, 'public');
 const staging = path.resolve(publicRoot, 'build-staging');
 const stagedAssets = path.join(staging, 'assets');
@@ -23,8 +24,13 @@ for (const entry of await readdir(stagedAssets, { withFileTypes: true })) {
   stagedNames.add(entry.name);
 }
 
-/* Open clients may still request previous lazy chunks. Keep immutable assets
-   for seven days, and switch the index only after all new files exist. */
+/* Make the new entry point visible only after every referenced asset is in
+   place. Keep old immutable assets available to existing pages for seven days. */
+await copyFile(stagedIndex, nextIndex);
+await rename(nextIndex, activeIndex);
+
+/* Prune only after the atomic index switch: even a long-running client holding
+   the previous index can still fetch its old chunks during the rollout. */
 for (const entry of await readdir(publicAssets, { withFileTypes: true })) {
   if (!entry.isFile() || stagedNames.has(entry.name)) continue;
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name)) continue;
@@ -32,7 +38,5 @@ for (const entry of await readdir(publicAssets, { withFileTypes: true })) {
   if ((await stat(file)).mtimeMs < Date.now() - 7 * 86400_000) await rm(file, { force: true });
 }
 
-await copyFile(stagedIndex, nextIndex);
-await rename(nextIndex, activeIndex);
 await rm(staging, { recursive: true, force: true });
 console.log('Promoted the new Workbench UI without interrupting requests for the previous build.');

@@ -5,6 +5,7 @@ import { AssistantMessage } from '@/components/whirl/thread/assistant-message';
 import { UserMessage } from '@/components/whirl/thread/user-message';
 import { isToolPart, uniqueToolParts } from '@/components/whirl/thread/tool-data';
 import { cn } from '@/lib/utils';
+import { followsLiveEdge, followsMessages, shouldLoadOlder } from '@/lib/thread-scroll-policy.mjs';
 import type { FileRef } from '@/components/whirl/file-viewer';
 import type { Message, MessagePart } from '@/lib/types';
 
@@ -27,6 +28,7 @@ export function ThreadView({
   messages,
   isWorking,
   hasMore = false,
+  preserveScroll = false,
   onLoadOlder,
   viewportRef: externalViewportRef,
   onOpenFile,
@@ -36,6 +38,8 @@ export function ThreadView({
   messages: Message[] | undefined;
   isWorking: boolean;
   hasMore?: boolean;
+  /** Parent is prepending an older page and will restore the reader's position. */
+  preserveScroll?: boolean;
   onLoadOlder?: () => void;
   /** Lets the parent own the scroller (scroll preservation when older
    *  messages are prepended). */
@@ -48,6 +52,8 @@ export function ThreadView({
   const internalRef = useRef<HTMLDivElement>(null);
   const viewportRef = externalViewportRef ?? internalRef;
   const atBottomRef = useRef(true);
+  const previousScrollTopRef = useRef<number | null>(null);
+  const wasPreservingScrollRef = useRef(false);
   const lastRevisionRef = useRef('');
   const [showJump, setShowJump] = useState(false);
   const [atTop, setAtTop] = useState(true);
@@ -107,15 +113,31 @@ export function ThreadView({
     const revision = `${list.length}:${last?.id || ''}:${last?.revision || 0}:${(last?.parts || []).map((part) => `${part.text?.length || 0}:${part.state?.status || ''}`).join(',') || ''}`;
     if (revision === lastRevisionRef.current) return;
     lastRevisionRef.current = revision;
+    if (preserveScroll) return;
     const viewport = viewportRef.current;
     if (!viewport) return;
-    if (atBottomRef.current) {
+    if (followsMessages(atBottomRef.current, preserveScroll)) {
       viewport.scrollTop = viewport.scrollHeight;
       setShowJump(false);
     } else {
       setShowJump(true);
     }
-  }, [messages]);
+  }, [messages, preserveScroll]);
+
+  useEffect(() => {
+    if (preserveScroll) {
+      wasPreservingScrollRef.current = true;
+      return;
+    }
+    if (!wasPreservingScrollRef.current) return;
+    wasPreservingScrollRef.current = false;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+    atBottomRef.current = nearBottom;
+    setAtTop(viewport.scrollTop <= 2);
+    setShowJump(!nearBottom);
+  }, [preserveScroll]);
 
   function jumpToLatest() {
     const viewport = viewportRef.current;
@@ -133,12 +155,20 @@ export function ThreadView({
         className="wb-scroll h-full overflow-y-auto overscroll-contain"
         onScroll={(event) => {
           const element = event.currentTarget;
-          setAtTop(element.scrollTop <= 2);
+          const scrollTop = element.scrollTop;
+          const previousScrollTop = previousScrollTopRef.current;
+          const previous = previousScrollTop ?? (atBottomRef.current ? element.scrollHeight - element.clientHeight : scrollTop);
+          const movedUp = scrollTop < previous - 1;
+          previousScrollTopRef.current = scrollTop;
+          setAtTop(scrollTop <= 2);
           const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
-          atBottomRef.current = nearBottom;
-          if (nearBottom) setShowJump(false);
-          if (nearBottom) return;
-          if (element.scrollTop <= 56 && hasMore && onLoadOlder) onLoadOlder();
+          /* A deliberate upward gesture disables live-follow immediately,
+             even while inside the bottom proximity threshold. */
+          atBottomRef.current = followsLiveEdge(nearBottom, movedUp);
+          setShowJump(!atBottomRef.current);
+          /* Loading older is a top-edge condition, independent of live-follow;
+             short pages can satisfy both conditions at once. */
+          if (shouldLoadOlder(scrollTop, hasMore) && onLoadOlder) onLoadOlder();
         }}
       >
         <div className="mx-auto w-full max-w-[52rem] px-3 pt-5 pb-[var(--dock-clearance,7rem)] md:px-6">

@@ -8,11 +8,11 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
-    "build": "npm run sync:ui-assets && tsc --noEmit && vite build && node scripts/promote-ui-build.mjs",
+    "build": "npm run sync:ui-assets && tsc --noEmit && vite build && node scripts/check-ui-assets.mjs public/build-staging public && node scripts/promote-ui-build.mjs && node scripts/check-ui-assets.mjs public",
     "start": "node server.js",
     "sync:ui-assets": "node scripts/sync-ui-assets.mjs",
     "start:control": "node --disable-warning=ExperimentalWarning server/control.mjs",
-    "check": "node scripts/check-runtime.mjs && node --check server.js && node --check worker.js && node --check worker-alias.js && node --check public/login.js && node --check scripts/sync-ui-assets.mjs && node --check scripts/promote-ui-build.mjs && node scripts/check-radius.mjs && tsc --noEmit",
+    "check": "node scripts/check-runtime.mjs && node --check server.js && node --check worker.js && node --check worker-alias.js && node --check public/login.js && node --check scripts/sync-ui-assets.mjs && node --check scripts/promote-ui-build.mjs && node scripts/check-radius.mjs && node --check scripts/check-ui-assets.mjs && node --check src/lib/new-chat-policy.mjs && node --check src/lib/thread-scroll-policy.mjs && node scripts/check-ui-assets.mjs public && tsc --noEmit",
     "test": "node --disable-warning=ExperimentalWarning --test scripts/*.test.mjs",
     "test:runtime": "node scripts/workbench.smoke.mjs",
     "test:ui": "node --disable-warning=ExperimentalWarning scripts/workbench.ui-e2e.mjs",

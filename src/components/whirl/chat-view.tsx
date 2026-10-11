@@ -354,6 +354,7 @@ export function ChatView({
           messages={loading ? undefined : (messages || [])}
           isWorking={Boolean(isWorking)}
           hasMore={Boolean(session?.hasMoreMessages)}
+          preserveScroll={loadingOlder}
           onLoadOlder={() => void loadOlder()}
           viewportRef={viewportRef}
           onOpenFile={openFile}
