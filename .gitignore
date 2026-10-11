@@ -10,7 +10,8 @@ node_modules/
 # Local Cloudflare deploy config (account-specific IDs); see wrangler.example.jsonc
 wrangler.jsonc
 
-# Runtime data (user content / generated)
+# Runtime data (conversations, attachments, and generated state)
+data/control/
 data/login-failures.json
 
 # Build staging
