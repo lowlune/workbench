@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { sandboxSpawn } from '../server/security.mjs';
 
 test('parallel worktrees preserve dirty baseline, strict apply conflicts, safe discard', async t => {
+  mkdirSync('/tmp/opencode', { recursive: true });
   const dir = mkdtempSync('/tmp/opencode/wb-worktrees-'); const root = `${dir}/project`;
   mkdirSync(root); process.env.WORKBENCH_WORKTREE_ROOT = `${dir}/worktrees`;
   const { createWorktree, applyWorktree, discardWorktree, isGitRepo } = await import('../server/workspaces.mjs');
