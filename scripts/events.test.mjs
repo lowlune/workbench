@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { tempDir } from './test-helpers.mjs';
 import { EventEmitter } from 'node:events';
 import { Store } from '../server/store.mjs';
 import { replayEvents, streamEvents } from '../server/event-stream.mjs';
 import { createMessageWriter, safePart, mergeArtifact } from '../server/messages.mjs';
 
 function fixture(t) {
-  const directory = mkdtempSync('/tmp/opencode/wb-events-');
+  const directory = tempDir('wb-events');
   const store = new Store(directory);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
   return { directory, store };

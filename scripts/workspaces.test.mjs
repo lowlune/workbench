@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { tempDir, sandboxAvailable } from './test-helpers.mjs';
 import { execFileSync } from 'node:child_process';
 import { sandboxSpawn } from '../server/security.mjs';
 
 test('parallel worktrees preserve dirty baseline, strict apply conflicts, safe discard', async t => {
-  mkdirSync('/tmp/opencode', { recursive: true });
-  const dir = mkdtempSync('/tmp/opencode/wb-worktrees-'); const root = `${dir}/project`;
+  const dir = tempDir('wb-worktrees'); const root = `${dir}/project`;
   mkdirSync(root); process.env.WORKBENCH_WORKTREE_ROOT = `${dir}/worktrees`;
   const { createWorktree, applyWorktree, discardWorktree, isGitRepo } = await import('../server/workspaces.mjs');
   const git = args => execFileSync('/usr/bin/git', ['-C', root, ...args], { stdio: 'pipe' });
@@ -20,17 +20,21 @@ test('parallel worktrees preserve dirty baseline, strict apply conflicts, safe d
   // The sandbox permits normal linked-worktree git operations, but cannot
   // rewrite the original checkout's config/hooks or .git redirection file.
   const dataDir = `${dir}/control`; mkdirSync(dataDir);
-  const child = sandboxSpawn(process.execPath, ['-e', `
-    const fs=require('node:fs'),cp=require('node:child_process');
-    cp.execFileSync('/usr/bin/git',['status','--short']);
-    cp.execFileSync('/usr/bin/git',['add','-A']);
-    for(const file of [${JSON.stringify(`${root}/.git/config`)},'.git']){
-      try{fs.writeFileSync(file,'bad');throw Error('metadata writable')}catch(e){if(e.message==='metadata writable')throw e;}
-    }
-  `], { workspace: worktrees[0].path, home: dir, dataDir }, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; }); child.stdout.resume();
-  const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
-  assert.equal(code, 0, stderr);
+  if (sandboxAvailable()) {
+    const child = sandboxSpawn(process.execPath, ['-e', `
+      const fs=require('node:fs'),cp=require('node:child_process');
+      cp.execFileSync('/usr/bin/git',['status','--short']);
+      cp.execFileSync('/usr/bin/git',['add','-A']);
+      for(const file of [${JSON.stringify(`${root}/.git/config`)},'.git']){
+        try{fs.writeFileSync(file,'bad');throw Error('metadata writable')}catch(e){if(e.message==='metadata writable')throw e;}
+      }
+    `], { workspace: worktrees[0].path, home: dir, dataDir }, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; }); child.stdout.resume();
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    assert.equal(code, 0, stderr);
+  } else {
+    assert.throws(() => sandboxSpawn(process.execPath, ['-e', ''], { workspace: worktrees[0].path, home: dir, dataDir }, { stdio: 'ignore' }), /Agent sandbox unavailable/);
+  }
   writeFileSync(`${worktrees[0].path}/file.txt`, 'agent change\n');
   assert.equal(readFileSync(`${root}/file.txt`, 'utf8'), 'user dirty baseline\n');
   assert.equal((await applyWorktree(worktrees[0], root)).status, 'applied');

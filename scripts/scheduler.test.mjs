@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
+import { tempDir } from './test-helpers.mjs';
 import { Store, uid } from '../server/store.mjs';
 import { createScheduler } from '../server/scheduler.mjs';
 
 function fixture(t, options = {}) {
-  const directory = mkdtempSync('/tmp/opencode/wb-scheduler-');
+  const directory = tempDir('wb-scheduler');
   const store = new Store(directory);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
   const runs = new Map();

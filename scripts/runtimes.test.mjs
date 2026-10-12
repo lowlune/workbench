@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { tempDir, sandboxAvailable } from './test-helpers.mjs';
+const hasSandbox = sandboxAvailable();
 import { PiRuntime, OpenCodeRuntime } from '../server/runtimes.mjs';
 
 function fixture(t) {
-  const home = mkdtempSync('/tmp/opencode/wb-engines-'); const dataDir = `${home}/control`;
+  const home = tempDir('wb-engines'); const dataDir = `${home}/control`;
   const directory = `${dataDir}/general`;
   for (const dir of [directory, `${home}/.config/secrets`, `${home}/.opencode/bin`]) mkdirSync(dir, { recursive: true });
   writeFileSync(`${home}/.config/secrets/canary`, 'SECRET');
@@ -17,14 +19,14 @@ function fixture(t) {
   return { home, dataDir, directory };
 }
 
-test('real Pi discovery uses sandboxed IPC without provider credentials', { timeout: 30000 }, async t => {
+test('real Pi discovery uses sandboxed IPC without provider credentials', { timeout: 30000, skip: !hasSandbox }, async t => {
   const f = fixture(t); const runtime = new PiRuntime(f);
   t.after(() => runtime.close());
   const models = await runtime.models();
   assert.ok(Array.isArray(models)); assert.equal(models.length, 0);
 });
 
-test('Pi exposes the OpenCode OpenAI OAuth catalog through its Codex adapter', { timeout: 30000 }, async t => {
+test('Pi exposes the OpenCode OpenAI OAuth catalog through its Codex adapter', { timeout: 30000, skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const authDir = `${f.home}/.local/share/opencode`;
   mkdirSync(authDir, { recursive: true });
@@ -64,7 +66,7 @@ test('Pi waits for OpenCode to save a refreshed shared OAuth credential', async 
   assert.deepEqual(replies, [{ type: 'sync-shared-oauth-result', id: 'sync-1' }]);
 });
 
-test('OpenCode adapter owns separate sandboxed servers for concurrent same-folder runs and reaps them', { timeout: 20000 }, async t => {
+test('OpenCode adapter owns separate sandboxed servers for concurrent same-folder runs and reaps them', { timeout: 20000, skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const binary = `${f.home}/.opencode/bin/opencode`;
   writeFileSync(binary, readFileSync(new URL('./fixtures/fake-opencode.mjs', import.meta.url)), { mode: 0o700 });
@@ -83,7 +85,7 @@ test('OpenCode adapter owns separate sandboxed servers for concurrent same-folde
   for (const child of children) assert.ok(child.exitCode !== null || child.signalCode);
 });
 
-test('OpenCode runtime close resolves within its deadline (no stop hang)', { timeout: 20000 }, async t => {
+test('OpenCode runtime close resolves within its deadline (no stop hang)', { timeout: 20000, skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const binary = `${f.home}/.opencode/bin/opencode`;
   writeFileSync(binary, readFileSync(new URL('./fixtures/fake-opencode.mjs', import.meta.url)), { mode: 0o700 });
@@ -96,7 +98,7 @@ test('OpenCode runtime close resolves within its deadline (no stop hang)', { tim
   assert.ok(elapsed < 8000, `close() took ${elapsed}ms`);
 });
 
-test('a transient OpenCode startup failure does not permanently disable the shared runtime', { timeout: 30000 }, async t => {
+test('a transient OpenCode startup failure does not permanently disable the shared runtime', { timeout: 30000, skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const binary = `${f.home}/.opencode/bin/opencode`;
   writeFileSync(binary, '#!/usr/bin/env node\nprocess.exit(3);\n', { mode: 0o700 });

@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import { agentEnv, workspaceGuard, sandboxSpawn, terminateGroup, sandboxEnabled } from '../server/security.mjs';
 import { needsPermission } from '../server/pi/tools.mjs';
+import { tempDir, sandboxAvailable } from './test-helpers.mjs';
+const hasSandbox = sandboxAvailable();
 
 function fixture(t) {
-  const root = mkdtempSync('/tmp/opencode/wb-security-');
+  const root = tempDir('wb-security');
   const home = path.join(root, 'home'); const dataDir = path.join(home, 'control');
   const general = path.join(dataDir, 'general');
   for (const dir of [general, `${home}/.config/secrets`, `${home}/.ssh`, `${home}/.aws`, `${home}/outside`, `${home}/.config/gh`, `${home}/.local/share/opencode`, `${home}/.docker`, `${home}/.kube`, `${home}/.config/systemd/user`, `${home}/.config/autostart`, `${home}/.config/environment.d`, `${home}/.local/bin`, `${dataDir}/pi`]) mkdirSync(dir, { recursive: true });
@@ -40,7 +42,7 @@ test('environment allowlist removes control/cloud/provider/shell injection secre
   assert.deepEqual(agentEnv({ HOME: '/home/u', PATH: '/usr/bin', WORKBENCH_PROXY_KEY: 's', CLOUDFLARE_API_TOKEN: 's', OPENAI_API_KEY: 's', BASH_ENV: '/evil', NODE_OPTIONS: '--require=evil', AWS_SECRET_ACCESS_KEY: 's' }), { HOME: '/home/u', PATH: '/usr/bin' });
 });
 
-test('sandbox keeps DNS working without exposing /run/systemd/resolve', async t => {
+test('sandbox keeps DNS working without exposing /run/systemd/resolve', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   // /etc/resolv.conf is typically a symlink into /run (systemd-resolved). The
   // sandbox must resolve it WITHOUT mounting that directory, whose world-
@@ -71,7 +73,7 @@ test('test tool cannot bypass shell permissions; regex tricks do not matter', ()
   state.allowedTools.add('test'); assert.equal(needsPermission(state, { toolName: 'test' }), false);
 });
 
-for (const useHome of [false, true]) test(`real sandbox masks credentials and control state (${useHome ? 'home' : 'General'} workspace)`, async t => {
+for (const useHome of [false, true]) test(`real sandbox masks credentials and control state (${useHome ? 'home' : 'General'} workspace)`, { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const workspace = useHome ? f.home : f.general;
   const code = `const fs=require('node:fs'); const home=${JSON.stringify(f.home)};
@@ -85,7 +87,7 @@ for (const useHome of [false, true]) test(`real sandbox masks credentials and co
   assert.equal(result.code, 0, result.stderr); assert.match(result.stdout, /safe/);
 });
 
-test('real sandbox masks credential stores (gh, mcp-auth, docker, kube, npmrc, pypirc)', async t => {
+test('real sandbox masks credential stores (gh, mcp-auth, docker, kube, npmrc, pypirc)', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const code = `const fs=require('node:fs');const home=${JSON.stringify(f.home)};
     const stores=['.config/gh/hosts.yml','.local/share/opencode/mcp-auth.json','.docker/config.json','.kube/config','.npmrc','.pypirc'];
@@ -96,7 +98,7 @@ test('real sandbox masks credential stores (gh, mcp-auth, docker, kube, npmrc, p
   assert.match(result.stdout, /creds-safe/);
 });
 
-test('home workspace cannot persist via shell/systemd startup files', async t => {
+test('home workspace cannot persist via shell/systemd startup files', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   // workspace === HOME re-binds home read-write, so these paths must be masked
   // even though they are outside the "workspace" guard.
@@ -115,7 +117,7 @@ test('home workspace cannot persist via shell/systemd startup files', async t =>
   assert.equal(readFileSync(`${f.home}/workspace-ok`, 'utf8'), '1');
 });
 
-test('two real sandboxed processes overlap in the same General directory', async t => {
+test('two real sandboxed processes overlap in the same General directory', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const run = id => sandboxSpawn(process.execPath, ['-e', `const fs=require('node:fs');fs.writeFileSync('${id}.start',String(Date.now()));setTimeout(()=>{fs.writeFileSync('${id}.end',String(Date.now()));console.log('done')},400)`], { ...f, workspace: f.general }, { stdio: ['ignore', 'pipe', 'pipe'] });
   const results = await Promise.all([collect(run('a')), collect(run('b'))]);
@@ -125,13 +127,13 @@ test('two real sandboxed processes overlap in the same General directory', async
   assert.ok(Math.max(timestamp('a.start'), timestamp('b.start')) < Math.min(timestamp('a.end'), timestamp('b.end')));
 });
 
-test('plan sandbox denies workspace writes', async t => {
+test('plan sandbox denies workspace writes', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const result = await collect(sandboxSpawn(process.execPath, ['-e', "try{require('node:fs').writeFileSync('denied','x');process.exit(1)}catch{console.log('denied')}"], { ...f, workspace: f.general, readOnly: true }, { stdio: ['ignore', 'pipe', 'pipe'] }));
   assert.equal(result.code, 0, result.stderr);
 });
 
-test('TERM-resistant sandbox process is killed and reaped within deadline', async t => {
+test('TERM-resistant sandbox process is killed and reaped within deadline', { skip: !hasSandbox }, async t => {
   const f = fixture(t);
   const child = sandboxSpawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});console.log('ready');setInterval(()=>{},1000)"], { ...f, workspace: f.general }, { stdio: ['ignore', 'pipe', 'pipe'] });
   const result = collect(child);

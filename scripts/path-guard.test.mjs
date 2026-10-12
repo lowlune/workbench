@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { tempDir } from './test-helpers.mjs';
 import path from 'node:path';
 import { insideDir, resolvedPath } from '../server/security.mjs';
 
@@ -14,7 +15,7 @@ function agentsAllowed(root, requested) {
 }
 
 test('AGENTS.md path guard rejects directory-symlink escapes and traversal, allows nested files', t => {
-  const root = mkdtempSync('/tmp/opencode/wb-agents-');
+  const root = tempDir('wb-agents');
   mkdirSync(path.join(root, 'sub'), { recursive: true });
   symlinkSync('/etc', path.join(root, 'escape'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
